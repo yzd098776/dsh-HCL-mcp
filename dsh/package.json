@@ -16,9 +16,9 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cheese-sansan/MCP_HCL.git"
+    "url": "git+https://github.com/yzd098776/dsh-HCL-mcp.git"
   },
-  "homepage": "https://github.com/cheese-sansan/MCP_HCL#readme",
+  "homepage": "https://github.com/yzd098776/dsh-HCL-mcp#readme",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

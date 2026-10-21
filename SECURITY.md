@@ -12,7 +12,7 @@
 Please do **not** open a public issue for a security problem.
 
 - Preferred: GitHub private advisory —
-  <https://github.com/cheese-sansan/MCP_HCL/security/advisories/new>
+  <https://github.com/yzd098776/dsh-HCL-mcp/security/advisories/new>
 - Include: affected version, Windows version, the tool names involved, whether
   `MCP_HCL_ALLOW_LIVE_WRITE` was `1`, and a minimal reproduction (command or
   tool call plus the receipt directory).

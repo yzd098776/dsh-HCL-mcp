@@ -35,12 +35,12 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/cheese-sansan/MCP_HCL"
-Documentation = "https://github.com/cheese-sansan/MCP_HCL/blob/main/docs/README.md"
-Repository = "https://github.com/cheese-sansan/MCP_HCL"
-Changelog = "https://github.com/cheese-sansan/MCP_HCL/blob/main/CHANGELOG.md"
-Issues = "https://github.com/cheese-sansan/MCP_HCL/issues"
-Security = "https://github.com/cheese-sansan/MCP_HCL/security/policy"
+Homepage = "https://github.com/yzd098776/dsh-HCL-mcp"
+Documentation = "https://github.com/yzd098776/dsh-HCL-mcp/blob/main/docs/README.md"
+Repository = "https://github.com/yzd098776/dsh-HCL-mcp"
+Changelog = "https://github.com/yzd098776/dsh-HCL-mcp/blob/main/CHANGELOG.md"
+Issues = "https://github.com/yzd098776/dsh-HCL-mcp/issues"
+Security = "https://github.com/yzd098776/dsh-HCL-mcp/security/policy"
 
 [project.scripts]
 mcp-hcl = "mcp_hcl.server:main"

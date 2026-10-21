@@ -2,7 +2,7 @@
 
 **A Model Context Protocol server for HCL (H3C Cloud Lab): plan and stage topologies offline, inspect a live lab through its real telnet bridge, and change device configuration only through gated, receipt-backed operations.**
 
-[![CI](https://github.com/cheese-sansan/MCP_HCL/actions/workflows/software-ci.yml/badge.svg)](https://github.com/cheese-sansan/MCP_HCL/actions/workflows/software-ci.yml)
+[![CI](https://github.com/yzd098776/dsh-HCL-mcp/actions/workflows/software-ci.yml/badge.svg)](https://github.com/yzd098776/dsh-HCL-mcp/actions/workflows/software-ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
@@ -162,3 +162,7 @@ profile 的 patch 里填好 `MCP_HCL_INSTALL_ROOT` / `MCP_HCL_PROJECT_ROOTS` /
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+本仓库是基于 [cheese-sansan/MCP_HCL](https://github.com/cheese-sansan/MCP_HCL)（MIT）
+面向 DeepSeek Harness 插件市场的适配版本：新增插件包、工具安全注解与发布面文档，
+未改变服务的功能边界与验收口径。
