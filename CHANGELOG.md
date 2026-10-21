@@ -10,6 +10,10 @@ First public release: the packaging, Harness plugin bundle and tool safety
 metadata are new; the behaviour below was developed and verified against a real
 Windows HCL installation before the repository was published.
 
+Published as `mcp-hcl==0.5.0` on PyPI (wheel and sdist) with a matching
+`v0.5.0` GitHub Release; `pipx install mcp-hcl` installs the `mcp-hcl` server,
+and the bundle in `dsh/` is installed from the repository checkout.
+
 ### Added
 
 - **DeepSeek Harness plugin bundle** (`dsh/`): `package.json` plus
