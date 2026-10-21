@@ -64,6 +64,26 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  npm:
+    needs: build
+    # Opt-in: set the repository variable NPM_PUBLISH=true and add an npm
+    # automation token as the NPM_TOKEN secret. The bundle lives in the repo
+    # root package.json, so `npm publish` ships only package.json plus dsh/.
+    if: ${{ vars.NPM_PUBLISH == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Publish bundle to npm
+        run: |
+          npm --version
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
   pypi:
     needs: build
     # Opt-in: set the repository variable PYPI_PUBLISH=true after the trusted

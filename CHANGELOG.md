@@ -56,6 +56,12 @@ Real-machine bugs found only by running against HCL, not by the offline suite:
 - `machine_values` mixed JSON and raw escaping, producing unparsable values for
   some displays.
 
+- npm bundle publishing: root `package.json` is publishable as `dsh-mcp-hcl`
+  (the packed tarball contains only `package.json`, `LICENSE`, `README.md`
+  and `dsh/`), so the plugin installs with
+  `dsh plugin --profile desktop add dsh-mcp-hcl`; the release workflow has
+  an opt-in `npm` job (`NPM_PUBLISH=true` + `NPM_TOKEN`).
+
 ### Documentation
 
 - New live-lab evidence document (`docs/hcl-live-findings.md`) covering the

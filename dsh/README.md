@@ -22,14 +22,15 @@ connector row to the active DSH profile; the actual work happens in the
 
 ## Install
 
-From a checkout of this repository:
+From the npm registry:
 
 ```powershell
 pipx install mcp-hcl                    # provides the `mcp-hcl` console script
-dsh plugin --profile desktop add .       # register the bundle in a profile
+dsh plugin --profile desktop add dsh-mcp-hcl   # register the bundle in a profile
 ```
 
-From a published tarball: `dsh plugin --profile desktop add dsh-mcp-hcl-0.5.0.tgz`.
+Or from a checkout of this repository: `dsh plugin --profile desktop add .`
+From a packed tarball: `dsh plugin --profile desktop add dsh-mcp-hcl-0.5.0.tgz`.
 
 Then edit the generated row in
 `<DSH_HOME>\profiles\<profile>\cordis.patch.yml` (or the bundle copy before

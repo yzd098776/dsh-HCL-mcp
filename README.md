@@ -56,7 +56,8 @@ pipx install mcp-hcl                 # or: uv tool install mcp-hcl
 DeepSeek Harness plugin (adds the `hcl` MCP server row):
 
 ```powershell
-dsh plugin --profile desktop add .       # from the repository root, or a release tarball
+dsh plugin --profile desktop add dsh-mcp-hcl   # from the npm registry
+dsh plugin --profile desktop add .             # or from this checkout / a release tarball
 ```
 
 Then set the HCL paths in the composed profile patch — see
@@ -154,7 +155,7 @@ policy that permits them.
 MCP_HCL 把 HCL（H3C Cloud Lab）的规划、staging、只读回读与受控配置封装成 MCP
 工具，既可接入任意 MCP 客户端，也自带 DeepSeek Harness 插件包（`dsh/`）。
 
-安装：`pipx install mcp-hcl`，再 `dsh plugin --profile desktop add .`（仓库根目录），并在
+安装：`pipx install mcp-hcl`，再 `dsh plugin --profile desktop add dsh-mcp-hcl`（或仓库根 `add .`），并在
 profile 的 patch 里填好 `MCP_HCL_INSTALL_ROOT` / `MCP_HCL_PROJECT_ROOTS` /
 `MCP_HCL_OUTPUT_ROOT`。写设备默认关闭（`MCP_HCL_ALLOW_LIVE_WRITE=0`），只读与
 离线工具可直接使用。边界：本服务不创建虚拟机、不代替 HCL 画布，也不声称已证明
