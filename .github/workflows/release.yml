@@ -62,6 +62,9 @@ jobs:
 
   pypi:
     needs: build
+    # Opt-in: set the repository variable PYPI_PUBLISH=true after the trusted
+    # publisher (project `mcp-hcl`, environment `pypi`) is configured on PyPI.
+    if: ${{ vars.PYPI_PUBLISH == 'true' }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
