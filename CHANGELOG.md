@@ -16,9 +16,10 @@ and the bundle in `dsh/` is installed from the repository checkout.
 
 ### Added
 
-- **DeepSeek Harness plugin bundle** (`dsh/`): `package.json` plus
-  `cordis.patch.yml` registering `@deepseek-ai/dsh-mcp-client` as the `hcl`
-  server. Config-only: no Host module, no lifecycle script, no Harness core
+- **DeepSeek Harness plugin bundle**: root `package.json` plus
+  `dsh/cordis.patch.yml` registering `@deepseek-ai/dsh-mcp-client` as the `hcl`
+  server (`dsh/package.json` keeps the same bundle installable when only the
+  subdirectory is shipped). Config-only: no Host module, no lifecycle script, no Harness core
   patch.
 - **Tool safety annotations**: all 55 tools now advertise
   `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`

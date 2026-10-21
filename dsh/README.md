@@ -26,7 +26,7 @@ From a checkout of this repository:
 
 ```powershell
 pipx install mcp-hcl                    # provides the `mcp-hcl` console script
-dsh plugin --profile desktop add .\dsh   # register the bundle in a profile
+dsh plugin --profile desktop add .       # register the bundle in a profile
 ```
 
 From a published tarball: `dsh plugin --profile desktop add dsh-mcp-hcl-0.5.0.tgz`.

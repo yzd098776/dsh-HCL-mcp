@@ -202,7 +202,7 @@ hcl_parity_report 的 reproduction_targets 保存以下全部目标、依赖和�
 
 为把本仓库作为 DeepSeek Harness 插件发布，补齐了市场评审实际读取的材料：
 
-- `dsh/package.json` + `dsh/cordis.patch.yml` + `dsh/README.md`：config-only bundle，插入 `@deepseek-ai/dsh-mcp-client`（`serverName: hcl`、`command: mcp-hcl`、`MCP_HCL_SCHEMA_MODE=dsh`、`MCP_HCL_ALLOW_LIVE_WRITE=0`）；不含 Host 模块、客户端入口或生命周期脚本。用 `dsh --profile web --patch .\dsh\cordis.patch.yml --dump-config` 组合通过。
+- 根 `package.json`（`dsh.bundle.patch: ./dsh/cordis.patch.yml`）+ `dsh/package.json` + `dsh/cordis.patch.yml` + `dsh/README.md`：config-only bundle；市场按“根级 package.json + Bundle 声明”发现插件，所以根目录也声明一次，`dsh plugin --profile desktop add .` 在仓库根即可安装（`add .\dsh` 仍可用）。实测：新 profile 安装后 `--dump-config` 出现 `- id: mcp-hcl` 与 `command: mcp-hcl`。，插入 `@deepseek-ai/dsh-mcp-client`（`serverName: hcl`、`command: mcp-hcl`、`MCP_HCL_SCHEMA_MODE=dsh`、`MCP_HCL_ALLOW_LIVE_WRITE=0`）；不含 Host 模块、客户端入口或生命周期脚本。用 `dsh --profile web --patch .\dsh\cordis.patch.yml --dump-config` 组合通过。
 - 工具安全注解：`src/mcp_hcl/tool_annotations.py` 把 55 个工具分为 24 只读 / 14 设备破坏性 / 17 其它，`StrictFastMCP.list_tools` 在发现面补齐 `readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`；未分类工具落到保守回退（非只读、破坏性、开放世界），契约测试 `test_every_advertised_tool_carries_safety_annotations` 固定该不变量（DSH 模式 55/55 带注解）。
 - 发布面：`README.md` 重写为市场可直接抽取的英文主文档（定位、改变/不改变什么、安装、权限、边界、状态），`CHANGELOG.md`（0.5.0 首次公开发布，含六类真机 bug 修复）、`SECURITY.md`（报告渠道与范围）、`.github/workflows/release.yml`（tag `v*` → sdist/wheel、SHA256SUMS、GitHub Release、PyPI trusted publishing），`pyproject.toml` 补 keywords/classifiers/urls。
 - 本地软件检查：ruff 与 format 干净，406 tests、9 failures 全部是本机执行策略拒绝运行未签名 `scripts/*.ps1`（环境限制，CI 上默认策略允许），`native_process_audit_passed=true`、`manifest_unchanged=true`、`live_write=0`。
