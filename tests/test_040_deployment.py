@@ -108,7 +108,9 @@ class Deployment040Tests(unittest.TestCase):
             self.store,
             catalog=self.catalog,
             writes_enabled=True,
-            session_factory=lambda pipe: channels["r1" if pipe.endswith("device3") else "r2"],
+            # The live console is the telnet bridge (30000 + device number), so
+            # the fixture maps devices by the port it is asked to open.
+            session_factory=lambda pipe: channels["r1" if pipe.endswith(":30003") else "r2"],
         )
 
     def test_all_backups_before_configuration_and_actual_readback(self):

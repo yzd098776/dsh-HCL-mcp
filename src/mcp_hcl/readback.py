@@ -174,6 +174,11 @@ def vlan_database(text: str) -> list[dict]:
 
 def qos_definitions(text: str, kind: str) -> list[dict]:
     label = {"classifiers": "Classifier", "behaviors": "Behavior", "policies": "Policy"}[kind]
+    if not text.strip():
+        # A device with no user-defined QoS answers the query with nothing at all:
+        # no header, no "none is configured" line. An empty body is an empty
+        # database, and the transcript integrity checks have already run.
+        return []
     if not re.search(
         r"User[- ]defined\s+(?:classifier|behavior|QoS policy|policy)\s+information", text, re.I
     ):

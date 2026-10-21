@@ -9,22 +9,121 @@ import re
 import time
 from pathlib import Path
 
-from mcp_hcl.console import ConsoleError, ConsoleSession, _decode, describe, open_console_pipe
+from mcp_hcl.console import (
+    ConsoleError,
+    ConsoleSession,
+    _decode,
+    describe,
+    open_console_pipe,
+    open_telnet,
+)
 
 PROMPT = re.compile(r"(?:^|\n)(<[^<>\r\n]{1,128}>|\[[^\[\]\r\n]{1,160}\])\s*$")
 PAGER = re.compile(r"(?:----\s*More\s*----|--More--)\s*$", re.I)
+PAGER_NOISE = re.compile(r"[ \t]*(?:----\s*More\s*----|--More--)[ \t]*", re.I)
 CLI_ERROR = re.compile(
     r"(?:^|\n)\s*(?:%\s*(?:Unrecognized|Incomplete|Wrong|Error|Too many)|Error:|Invalid command|Permission denied)",
     re.I,
 )
 
 
-def clean_text(raw: bytes) -> str:
+def _normalize(raw: bytes) -> str:
     text = _decode(raw)[0].replace("\r", "")
     text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
     while "\b" in text:
         text = re.sub(r".?\x08", "", text)
     return text
+
+
+def pager_pending(raw: bytes) -> bool:
+    """Whether the device is waiting at a pager prompt.
+
+    Checked against the raw text, before :func:`clean_text` removes the pager
+    markers: the marker is transport noise in a readback body but it is the only
+    signal that a page must be continued.
+    """
+    return bool(PAGER.search(_normalize(raw)))
+
+
+def clean_text(raw: bytes) -> str:
+    text = _normalize(raw)
+    # Paging prompts are transport noise, not device output: the pager emits them
+    # after a page is complete, and they can land inside a readback body (for
+    # example between two VLAN sections) or be glued to the trailing prompt.
+    text = PAGER_NOISE.sub("", text)
+    return text
+
+
+def command_echo_present(text: str, command: str) -> bool:
+    """Whether the device echoed ``command``, tolerating terminal-width wrapping.
+
+    Comware echoes at the terminal width (80 columns by default), so a long
+    command returns split across physical lines with nothing inserted between
+    the fragments - ``configuration replace file flash:/mcp_<32 hex>_device1``
+    arrives as ``...MSR3`` then ``6-20_1_before.cfg``. Matching a single line
+    for the whole command therefore fails for exactly the commands that carry a
+    flash path, so the fragments are rejoined here before comparing.
+
+    A leading ``>`` or ``]`` is the prompt the echo was typed after; only a
+    suffix that itself looks like the start of the command is stripped, so an
+    output line that merely ends with a bracket cannot become a false echo.
+    """
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        tail = stripped
+        for marker in (">", "]"):
+            position = tail.rfind(marker)
+            if position == -1:
+                continue
+            after = tail[position + 1 :]
+            if after and (command.startswith(after) or after.startswith(command)):
+                tail = after
+                break
+        if not tail:
+            continue
+        accumulated = tail
+        if accumulated.startswith(command):
+            return True
+        if not command.startswith(accumulated):
+            continue
+        for continuation in lines[index + 1 :]:
+            accumulated += continuation.strip()
+            if accumulated.startswith(command):
+                return True
+            if not command.startswith(accumulated):
+                break
+    return False
+
+
+def ensure_user_view(channel):
+    """Leave any configuration view, tolerating Comware's rejection in user view.
+
+    ``return`` exists in every view except user view, where the device answers
+    ``% Unrecognized command``. A fresh connection therefore cannot blindly send
+    it: doing so would fail the whole transaction on an already-clean channel.
+    The prompt captured by the session decides, and when it is unknown the
+    rejection itself is the proof that the channel is already in user view.
+    """
+    prompt = getattr(channel, "prompt", None)
+    if isinstance(prompt, str) and prompt.startswith("<"):
+        return
+    history = getattr(channel, "history", None)
+    recorded = len(history) if isinstance(history, list) else None
+    try:
+        channel.exchange("return")
+    except ConsoleError:
+        observed = getattr(channel, "prompt", None)
+        if not (isinstance(observed, str) and observed.startswith("<")):
+            raise
+        # The device read the line and rejected it, so nothing was left
+        # half-entered. The captured user-view prompt is positive evidence, and
+        # the rejected line is dropped so it cannot be mistaken for a step.
+        if recorded is not None and len(history) > recorded:
+            del history[recorded:]
+        channel.failed = False
 
 
 class PipeLease:
@@ -80,24 +179,44 @@ class PersistentConsole:
         timeout=12.0,
         max_bytes=1024 * 1024,
         open_timeout=2.0,
+        native_lease_root: Path | None = None,
     ):
         self.pipe = pipe
         self.native_channel = session is None
         # Native consumers using different output directories still compete
-        # for the same per-user endpoint lock. Synthetic sessions stay local.
-        actual_lease_root = (
-            Path.home() / ".mcp_hcl" / "console-leases" if self.native_channel else lease_root
-        )
+        # for the same per-user endpoint lock, so they bypass the caller's
+        # output-root-scoped ``lease_root``. The per-user location is only the
+        # default: a host running this server under a restricted token can
+        # write only in its own workspace, so it passes an explicit
+        # ``native_lease_root``. Synthetic sessions stay local to ``lease_root``.
+        if self.native_channel and native_lease_root is not None:
+            actual_lease_root = native_lease_root
+        elif self.native_channel:
+            actual_lease_root = Path.home() / ".mcp_hcl" / "console-leases"
+        else:
+            actual_lease_root = lease_root
         self.lease = PipeLease(actual_lease_root, pipe)
         self.timeout = timeout
         self.max_bytes = max_bytes
+        location = describe(pipe)
+        self.transport = location["transport"]
         try:
-            # Native open_console_pipe proves the connected instance is exclusive
-            # before any drain or input. Process existence is not ownership:
-            # an idle MultiCC (or an unrelated PuTTY) must not veto this endpoint.
-            self.session = session or ConsoleSession(
-                open_console_pipe(pipe, timeout=open_timeout), max_bytes=max_bytes
-            )
+            # Native sessions prove the connected instance is exclusive before
+            # any drain or input. Process existence is not ownership: an idle
+            # MultiCC (or an unrelated PuTTY) must not veto this endpoint.
+            #
+            # The device pipe itself cannot be opened by a second process: HCL's
+            # SimwareClient holds the only read handle and republishes the
+            # stream as a telnet server on 30000 + device, so that bridge is the
+            # transport a live console actually uses.
+            if session is not None:
+                self.session = session
+            elif location["transport"] == "telnet":
+                self.session = open_telnet(location["host"], location["port"], timeout=open_timeout)
+            else:
+                self.session = ConsoleSession(
+                    open_console_pipe(pipe, timeout=open_timeout), max_bytes=max_bytes
+                )
         except Exception:
             self.lease.close()
             raise
@@ -128,20 +247,11 @@ class PersistentConsole:
             if confirmation and not confirmed and re.search(r"\[(?:Y/N|y/n)\]:?\s*$", text):
                 self.session.send(answer)
                 confirmed = True
-            if PAGER.search(text) and len(output) != last_pager_size:
+            if pager_pending(bytes(output)) and len(output) != last_pager_size:
                 # Space is the documented pager continuation, not a command line.
-                try:
-                    sent = os.write(self.session._write_fd, b" ")
-                except OSError as exc:
-                    from mcp_hcl.console import _os_error
-
-                    raise _os_error(exc, stage="pager", api="os.write") from exc
-                if sent != 1:
-                    raise ConsoleError(
-                        "Pager continuation write failed",
-                        code="pager_write_failed",
-                        detail={"stage": "pager"},
-                    )
+                # ``send_raw`` keeps this working for both the pipe descriptor
+                # and the telnet socket transport.
+                self.session.send_raw(b" ")
                 last_pager_size = len(output)
                 pager_count += 1
                 if pager_count > 256:
@@ -198,14 +308,7 @@ class PersistentConsole:
             sent = True
             raw = self._receive(confirmation=confirmation)
             text = clean_text(raw)
-            lines = text.splitlines()
-            echo = any(
-                line.strip() == command
-                or line.strip().endswith(">" + command)
-                or line.strip().endswith("]" + command)
-                for line in lines
-            )
-            if not echo:
+            if not command_echo_present(text, command):
                 raise ConsoleError(
                     "Console command echo is missing; response attribution failed",
                     code="command_echo_missing",

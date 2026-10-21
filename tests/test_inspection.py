@@ -122,6 +122,14 @@ class FormatterTests(unittest.TestCase):
             with self.assertRaises(ReadbackError):
                 qos_definitions(text, kind)
 
+    def test_a_device_with_no_qos_definitions_answers_with_nothing(self):
+        # Live Comware prints no header at all when no user-defined QoS exists,
+        # so an empty body is an empty database rather than a failed readback.
+        for kind in ("classifiers", "behaviors", "policies"):
+            with self.subTest(kind=kind):
+                self.assertEqual(qos_definitions("", kind), [])
+                self.assertEqual(qos_definitions("  \n\t\n", kind), [])
+
     def test_partial_states_and_tampered_transcript_are_not_empty_success(self):
         with self.assertRaises(ReadbackError):
             interface_states(PORTS.replace("Line protocol state: UP", ""))
@@ -375,6 +383,305 @@ class RuntimeBindingTests(unittest.TestCase):
         finally:
             channel.session.close()
             server.close()
+
+
+class VdiDiskUuidTests(unittest.TestCase):
+    """The staged copy and the running VM's disk are the same disk by UUID."""
+
+    def vdi(self, path, disk_uuid):
+        from mcp_hcl.runtime_binding import _vdi_uuid_bytes
+
+        header = bytearray(512)
+        header[0:4] = b"<<< "
+        header[0x40:0x44] = (0xBEDA107F).to_bytes(4, "little")
+        header[0x44:0x48] = (0x00010001).to_bytes(4, "little")
+        header[0x188:0x198] = _vdi_uuid_bytes(disk_uuid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(bytes(header))
+
+    def test_a_vdi_reports_the_disk_uuid_from_its_linkage_field(self):
+        from mcp_hcl.runtime_binding import vdi_disk_uuid
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "device1.vdi"
+            disk_uuid = str(uuid4())
+            self.vdi(path, disk_uuid)
+            self.assertEqual(vdi_disk_uuid(path), disk_uuid)
+
+    def test_something_that_is_not_a_vdi_has_no_disk_uuid(self):
+        from mcp_hcl.runtime_binding import vdi_disk_uuid
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "device1.vdi"
+            path.write_bytes(b"synthetic disk")
+            self.assertIsNone(vdi_disk_uuid(path))
+            self.assertIsNone(vdi_disk_uuid(Path(temporary) / "absent.vdi"))
+
+
+class BridgeEvidenceTests(unittest.TestCase):
+    """The telnet bridge is identified without any privileged process access."""
+
+    def test_the_bridge_pipe_mapping_comes_from_hcls_own_log(self):
+        from mcp_hcl.runtime_binding import bridge_pipes
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "HCL.log").write_text(
+                "2026-10-21 13:02:25,362 - HCL topo1 - INFO: create_telnet_server success "
+                "strPipeName:\\\\.\\pipe\\topo1-device1, telnet_port:30001)\n"
+                "2026-10-21 13:02:25,400 - HCL topo1 - INFO: create_telnet_server success "
+                "strPipeName:\\\\.\\pipe\\topo1-device2, telnet_port:30002)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(bridge_pipes(root, 30001), ["\\\\.\\pipe\\topo1-device1"])
+            self.assertEqual(bridge_pipes(root, 30009), [])
+
+    def test_the_telnet_branch_accepts_the_hcl_bridge_process(self):
+        from unittest import mock
+
+        from mcp_hcl.runtime_binding import RuntimeBinding
+
+        target = {
+            "device_id": 1,
+            "pipe": "\\\\.\\pipe\\topo1-device1",
+            "vm_uuid": str(uuid4()),
+            "owner_sid": "S-1-5-21-1",
+        }
+        channel = SimpleNamespace(transport="telnet")
+        with (
+            mock.patch("mcp_hcl.runtime_binding.listener_pids", return_value=[4321]),
+            mock.patch(
+                "mcp_hcl.runtime_binding.process_image", return_value="E:/HCL/SimwareClient.exe"
+            ),
+            mock.patch("mcp_hcl.runtime_binding.process_session", return_value=1),
+            mock.patch("mcp_hcl.runtime_binding.current_session", return_value=1),
+            mock.patch(
+                "mcp_hcl.runtime_binding.bridge_pipes",
+                return_value=["\\\\.\\pipe\\topo1-device1"],
+            ),
+        ):
+            identity = RuntimeBinding().verify_pipe(channel, target)
+        self.assertEqual(identity["console_transport"], "telnet")
+        self.assertEqual(identity["console_server_pid"], 4321)
+        self.assertEqual(identity["telnet_port"], 30001)
+        self.assertEqual(
+            identity["verified_scope"],
+            "running_vm_staged_config_disk_and_hcl_telnet_bridge_identity_only",
+        )
+
+    def test_a_bridge_that_is_not_hcl_or_not_in_this_session_is_rejected(self):
+        from unittest import mock
+
+        from mcp_hcl.runtime_binding import RuntimeBinding
+
+        target = {
+            "device_id": 1,
+            "pipe": "\\\\.\\pipe\\topo1-device1",
+            "vm_uuid": str(uuid4()),
+            "owner_sid": "S-1-5-21-1",
+        }
+        channel = SimpleNamespace(transport="telnet")
+        cases = {
+            "not_hcl": {"listener_pids": [4321], "process_image": "C:/Windows/System32/telnet.exe"},
+            "no_listener": {"listener_pids": []},
+            "two_listeners": {"listener_pids": [4321, 4322]},
+            "other_session": {"process_session": 2},
+            "unrecorded_bridge": {"bridge_pipes": ["\\\\.\\pipe\\other-device1"]},
+        }
+        for name, overrides in cases.items():
+            with self.subTest(name=name):
+                patches = {
+                    "listener_pids": [4321],
+                    "process_image": "E:/HCL/SimwareClient.exe",
+                    "process_session": 1,
+                    "current_session": 1,
+                    "bridge_pipes": ["\\\\.\\pipe\\topo1-device1"],
+                }
+                patches.update(overrides)
+                with (
+                    mock.patch(
+                        "mcp_hcl.runtime_binding.listener_pids",
+                        return_value=patches["listener_pids"],
+                    ),
+                    mock.patch(
+                        "mcp_hcl.runtime_binding.process_image",
+                        return_value=patches["process_image"],
+                    ),
+                    mock.patch(
+                        "mcp_hcl.runtime_binding.process_session",
+                        return_value=patches["process_session"],
+                    ),
+                    mock.patch(
+                        "mcp_hcl.runtime_binding.current_session",
+                        return_value=patches["current_session"],
+                    ),
+                    mock.patch(
+                        "mcp_hcl.runtime_binding.bridge_pipes",
+                        return_value=patches["bridge_pipes"],
+                    ),
+                    self.assertRaises(ConsoleError),
+                ):
+                    RuntimeBinding().verify_pipe(channel, target)
+
+
+class StagedDiskBindingTests(unittest.TestCase):
+    """A staged copy binds to the running VM through the shared disk UUID."""
+
+    def setUp(self):
+        from mcp_hcl.runtime_binding import _vdi_uuid_bytes
+
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.home = Path(self.temporary.name)
+        self.project = self.home / "staged"
+        (self.project / "ConfigDisk").mkdir(parents=True)
+        self.net = self.project / "project.net"
+        self.net.write_text("synthetic net")
+        self.disk = self.project / "ConfigDisk/device3.vdi"
+        self.vm_uuid = str(uuid4())
+        self.disk_uuid = str(uuid4())
+        header = bytearray(512)
+        header[0:4] = b"<<< "
+        header[0x40:0x44] = (0xBEDA107F).to_bytes(4, "little")
+        header[0x44:0x48] = (0x00010001).to_bytes(4, "little")
+        header[0x188:0x198] = _vdi_uuid_bytes(self.disk_uuid)
+        self.disk.write_bytes(bytes(header))
+
+        # The running VM mounts the *source* project's disk, not the staged copy;
+        # both files carry the same VirtualBox disk UUID.
+        live = self.home / "source/ConfigDisk/device3.vdi"
+        live.parent.mkdir(parents=True)
+        live.write_bytes(bytes(header))
+        self.cfg = self.home / "HCL VMs/lab/device3/lab-device3.vbox"
+        self.cfg.parent.mkdir(parents=True)
+        self.cfg.write_text(
+            f'<VirtualBox><Machine name="lab-device3" uuid="{{{self.vm_uuid}}}">'
+            f'<MediaRegistry><HardDisks><HardDisk uuid="{{{self.disk_uuid}}}" '
+            f'location="{live.as_posix()}"/></HardDisks></MediaRegistry>'
+            f'<Hardware><UART><Port hostMode="HostPipe" server="true" '
+            f'path="\\\\.\\pipe\\lab-device3"/></UART></Hardware>'
+            f"<StorageControllers><StorageController>"
+            f'<AttachedDevice type="HardDisk"><Image uuid="{{{self.disk_uuid}}}"/>'
+            f"</AttachedDevice></StorageController></StorageControllers></Machine></VirtualBox>"
+        )
+        self.values = {
+            "name": "lab-device3",
+            "UUID": self.vm_uuid,
+            "VMState": "running",
+            "CfgFile": str(self.cfg),
+            "IDE-ImageUUID-0-0": self.disk_uuid,
+        }
+        self.document = SimpleNamespace(directory=self.project, net_path=self.net)
+
+    def binder(self):
+        def run(args, **kwargs):
+            data = (
+                json.dumps(
+                    {"profile": str(self.home), "sid": "S-1-5-21-1", "vbox": "D:/VBox"}
+                ).encode()
+                if args[0] == "powershell.exe"
+                else "\n".join(
+                    key + "=" + json.dumps(value) for key, value in self.values.items()
+                ).encode()
+            )
+            return SimpleNamespace(returncode=0, stdout=data)
+
+        return RuntimeBinding(runner=run)
+
+    def test_a_shared_disk_uuid_binds_the_staged_copy_to_the_running_vm(self):
+        target = self.binder().resolve(self.document, {"device_id": 3}, "lab")
+        self.assertEqual(target["configuration_disk_binding"], "disk_uuid")
+        self.assertEqual(target["configuration_disk_uuid"], self.disk_uuid)
+        self.assertEqual(target["vm_uuid"], self.vm_uuid)
+
+    def test_a_different_disk_uuid_is_still_refused(self):
+        self.values["IDE-ImageUUID-0-0"] = str(uuid4())
+        with self.assertRaisesRegex(ConsoleError, "does not mount the staged configuration disk"):
+            self.binder().resolve(self.document, {"device_id": 3}, "lab")
+
+    def test_a_staged_disk_that_is_not_a_vdi_cannot_be_bound(self):
+        self.disk.write_bytes(b"synthetic disk")
+        with self.assertRaisesRegex(ConsoleError, "not a readable VDI"):
+            self.binder().resolve(self.document, {"device_id": 3}, "lab")
+
+    def test_a_path_binding_is_still_reported_as_such(self):
+        self.cfg.write_text(
+            self.cfg.read_text().replace(
+                (self.home / "source/ConfigDisk/device3.vdi").as_posix(),
+                self.disk.as_posix(),
+            )
+        )
+        self.values.pop("IDE-ImageUUID-0-0")
+        self.values["IDE-0-0"] = str(self.disk)
+        target = self.binder().resolve(self.document, {"device_id": 3}, "lab")
+        self.assertEqual(target["configuration_disk_binding"], "path")
+
+
+class MachineValuesTests(unittest.TestCase):
+    """VBoxManage mixes JSON-escaped and raw-backslash values in one listing."""
+
+    def test_both_escaping_conventions_decode_to_the_on_disk_string(self):
+        from mcp_hcl.runtime_binding import machine_values
+
+        # Captured from ``VBoxManage showvminfo topo1-device1 --machinereadable``:
+        # CfgFile is JSON-escaped (double backslashes), IDE-1-0 and uartmode2 are
+        # raw single backslashes, and VideoMode carries quotes that are not a
+        # wrapper. ``json.loads`` alone rejects every backslash field.
+        listing = (
+            'name="topo1-device1"\n'
+            'CfgFile="C:\\\\Users\\\\yzdwxl\\\\HCL VMs\\\\topo1\\\\device1\\\\x.vbox"\n'
+            '"IDE-1-0"="c:\\\\users\\\\yzdwxl\\\\hcl\\\\ConfigDisk\\\\device1.vdi"\n'
+            'uartmode2="server,\\\\\\\\.\\\\pipe\\\\topo1-device1"\n'
+            'VideoMode="720,400,0"@0,0 1\n'
+        )
+        values = machine_values(listing)
+        self.assertEqual(values["name"], "topo1-device1")
+        self.assertEqual(values["CfgFile"], "C:\\Users\\yzdwxl\\HCL VMs\\topo1\\device1\\x.vbox")
+        self.assertEqual(values["IDE-1-0"], "c:\\users\\yzdwxl\\hcl\\ConfigDisk\\device1.vdi")
+        self.assertEqual(values["uartmode2"], "server,\\\\.\\pipe\\topo1-device1")
+        self.assertEqual(values["VideoMode"], '"720,400,0"@0,0 1')
+
+    def test_quoted_storage_key_is_unwrapped_and_a_duplicate_is_refused(self):
+        from mcp_hcl.runtime_binding import machine_values
+
+        self.assertEqual(machine_values('"IDE-1-0"="/x/y.vdi"')["IDE-1-0"], "/x/y.vdi")
+        with self.assertRaises(ConsoleError):
+            machine_values('name="a"\nname="b"\n')
+
+
+class IntegrityDiagnosticTests(unittest.TestCase):
+    """A denied COM client must not be reported as a VM identity mismatch."""
+
+    def test_a_denied_vboxmanage_explains_the_token_instead_of_the_vm(self):
+        from mcp_hcl.runtime_binding import _observation_failure
+
+        denied = SimpleNamespace(
+            stdout=b"",
+            stderr=(
+                b"VBoxManage.exe: error: Failed to create the VirtualBox object!\n"
+                b"VBoxManage.exe: error: Details: code E_ACCESSDENIED (0x80070005), "
+                b"component VirtualBoxClientWrap, interface IVirtualBoxClient\n"
+            ),
+        )
+        message = _observation_failure(denied)
+        self.assertIn("cannot reach VirtualBox", message)
+        self.assertIn("token integrity", message)
+        self.assertNotIn("does not match", message)
+
+    def test_an_unrelated_vboxmanage_failure_stays_an_identity_failure(self):
+        from mcp_hcl.runtime_binding import _observation_failure
+
+        other = SimpleNamespace(stdout=b"", stderr=b"VBoxManage.exe: error: no such VM\n")
+        self.assertEqual(_observation_failure(other), "Registered VM identity observation failed")
+
+    def test_the_reported_integrity_level_is_a_known_name(self):
+        from mcp_hcl.runtime_binding import token_integrity
+
+        observed = token_integrity()
+        if "error" in observed:
+            self.skipTest(f"integrity unavailable: {observed['error']}")
+        self.assertIn(observed["level"], {"untrusted", "low", "medium", "high"})
+        self.assertIsInstance(observed["rid"], int)
 
 
 class InspectionStdioTests(unittest.IsolatedAsyncioTestCase):

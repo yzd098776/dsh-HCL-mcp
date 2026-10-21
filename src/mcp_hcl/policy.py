@@ -19,7 +19,7 @@ from mcp_hcl.acl_semantics import (
 )
 from mcp_hcl.acl_values import acl_header
 from mcp_hcl.cli_session import PersistentConsole
-from mcp_hcl.console import ConsoleError, endpoint
+from mcp_hcl.console import ConsoleError, resolve_endpoint
 from mcp_hcl.contracts import validation_errors
 from mcp_hcl.deployment import Deployment, config_text, verification_commands
 from mcp_hcl.generation import render_acl, render_vlan
@@ -183,7 +183,9 @@ class Policy:
             raise ConsoleError(
                 "Recovery target VM identity changed", code="recovery_target_changed"
             )
-        channel = self.session_factory(endpoint(topology, binding["device_id"]))
+        # The device pipe is read-exclusively by HCL's SimwareClient, which
+        # republishes it as the telnet console HCL's own GUI uses.
+        channel = self.session_factory(resolve_endpoint(topology, binding["device_id"]))
         try:
             identity = self.runtime.verify_pipe(channel, target)
         except Exception:

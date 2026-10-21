@@ -14,6 +14,7 @@ import ctypes
 import ctypes.wintypes as wt
 import msvcrt
 import os
+import socket
 import sys
 import threading
 import time
@@ -21,11 +22,18 @@ import unittest
 from unittest.mock import patch
 
 from mcp_hcl.console import (
+    DO,
+    IAC,
+    WILL,
+    WONT,
     ConsoleError,
     ConsoleSession,
     HclConsole,
     describe,
     endpoint,
+    open_telnet,
+    resolve_endpoint,
+    telnet_endpoint,
     writes_enabled_from_environment,
 )
 
@@ -79,6 +87,149 @@ def _pump(fd: int, size: int, timeout: float = 3.0) -> bytes:
         else:
             time.sleep(0.02)
     return bytes(data)
+
+
+class TelnetBridgeServer:
+    """A loopback stand-in for the telnet bridge HCL builds over a device pipe.
+
+    It announces options exactly like SimwareClient (WILL ECHO, WILL SGA,
+    DO BINARY), records the client's negotiation and raw writes, and escapes
+    every ``IAC`` byte in what it sends, so the client's un-doubling is
+    exercised rather than assumed.
+    """
+
+    def __init__(self, *, greeting: bytes = b"", reply: bytes = b"") -> None:
+        self.greeting = greeting
+        self.reply = reply
+        self.received: list[bytes] = []
+        self.negotiation = b""
+        self.raw = bytearray()
+        self.port = 0
+        self._server: socket.socket | None = None
+        self._client: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def reserve_port(self) -> int:
+        """Bind and release a port so a test can target a closed endpoint."""
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(("127.0.0.1", 0))
+            return probe.getsockname()[1]
+        finally:
+            probe.close()
+
+    def start(self) -> None:
+        # HCL maps device N to 30000 + N, and ``describe`` only accepts that
+        # range, so the stand-in bridge has to live there too. Start high in the
+        # range to stay clear of the device numbers a real lab uses.
+        last_error: OSError | None = None
+        for port in range(30990, 31025):
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(("127.0.0.1", port))
+                probe.listen(1)
+            except OSError as exc:
+                last_error = exc
+                probe.close()
+                continue
+            self._server = probe
+            self.port = port
+            break
+        else:
+            raise unittest.SkipTest(f"no free port in 30990..31024: {last_error}")
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def push(self, payload: bytes) -> None:
+        """Send device output after the connection is up, escaping ``IAC``."""
+        self._send(payload)
+
+    def push_raw(self, payload: bytes) -> None:
+        """Send bytes verbatim, so a doubled ``IAC`` can be presented exactly."""
+        client = self._client
+        if client is None:
+            return
+        try:
+            client.sendall(payload)
+        except OSError:
+            pass
+
+    def _send(self, payload: bytes) -> None:
+        client = self._client
+        if client is None:
+            return
+        try:
+            client.sendall(payload.replace(bytes([IAC]), bytes([IAC, IAC])))
+        except OSError:
+            pass
+
+    def _serve(self) -> None:
+        try:
+            client, _ = self._server.accept()
+        except OSError:
+            return
+        self._client = client
+        client.settimeout(0.05)
+        if self.greeting:
+            # Options are telnet commands, not device text: never escape them.
+            try:
+                client.sendall(self.greeting)
+            except OSError:
+                pass
+        pending = bytearray()
+        while not self._stop.is_set():
+            try:
+                chunk = client.recv(4096)
+            except (socket.timeout, BlockingIOError):
+                time.sleep(0.01)
+                continue
+            except OSError:
+                break
+            if not chunk:
+                break
+            self.raw.extend(chunk)
+            pending.extend(chunk)
+            # Peel client->server telnet commands off the front, keep the text.
+            text = bytearray()
+            index = 0
+            while index < len(pending):
+                if pending[index] != IAC:
+                    text.append(pending[index])
+                    index += 1
+                    continue
+                if index + 2 >= len(pending):
+                    break
+                self.negotiation += bytes(pending[index : index + 3])
+                index += 3
+            pending = bytearray(pending[index:])
+            # A real Comware console accepts a bare CR, which is what the client
+            # sends; CRLF is tolerated so a fixture can still use it.
+            while b"\r" in text:
+                line, _, rest = bytes(text).partition(b"\r")
+                text = bytearray(rest)
+                if text.startswith(b"\n"):
+                    text = text[1:]
+                if not line.strip():
+                    # The client's single wake newline is not a command.
+                    continue
+                self.received.append(line + b"\r\n")
+                if self.reply:
+                    self._send(self.reply)
+        try:
+            client.close()
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        self._stop.set()
+        for sock in (self._client, self._server):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
 
 class NamedPipeServer:
@@ -153,8 +304,14 @@ class NamedPipeServer:
                     if not chunk:
                         break
                     buffer += chunk
-                    while b"\r\n" in buffer:
-                        line, buffer = buffer.split(b"\r\n", 1)
+                    # The client terminates a command with a bare CR, which a real
+                    # Comware console accepts; a trailing LF is tolerated.
+                    while b"\r" in buffer:
+                        line, buffer = buffer.split(b"\r", 1)
+                        if buffer.startswith(b"\n"):
+                            buffer = buffer[1:]
+                        if not line.strip():
+                            continue
                         self.received.append(line.decode("ascii", "replace"))
                         os.write(descriptor, self.reply)
             finally:
@@ -197,8 +354,41 @@ class PipeNameTests(unittest.TestCase):
         self.assertEqual(endpoint("topo1", 6), "\\\\.\\pipe\\topo1-device6")
         self.assertEqual(
             describe("\\\\.\\pipe\\topo77-device12"),
-            {"pipe": "\\\\.\\pipe\\topo77-device12", "topology": "topo77", "device": 12},
+            {
+                "pipe": "\\\\.\\pipe\\topo77-device12",
+                "endpoint": "\\\\.\\pipe\\topo77-device12",
+                "transport": "named_pipe",
+                "topology": "topo77",
+                "device": 12,
+            },
         )
+
+    def test_telnet_endpoint_is_the_default_and_maps_to_30000_plus_device(self) -> None:
+        self.assertEqual(telnet_endpoint("topo1", 6), "telnet://127.0.0.1:30006")
+        self.assertEqual(resolve_endpoint("topo1", 6), telnet_endpoint("topo1", 6))
+        self.assertEqual(
+            describe("telnet://127.0.0.1:30012"),
+            {
+                "pipe": "telnet://127.0.0.1:30012",
+                "endpoint": "telnet://127.0.0.1:30012",
+                "transport": "telnet",
+                "host": "127.0.0.1",
+                "port": 30012,
+                "topology": None,
+                "device": 12,
+            },
+        )
+
+    def test_telnet_endpoints_outside_the_assigned_range_are_refused(self) -> None:
+        for bad in (
+            "telnet://127.0.0.1:30000",
+            "telnet://127.0.0.1:31025",
+            "telnet://10.0.0.1:30001",
+            "telnet://127.0.0.1:23",
+        ):
+            with self.subTest(endpoint=bad):
+                with self.assertRaises(ConsoleError):
+                    describe(bad)
 
     def test_only_hcl_console_pipes_are_accepted(self) -> None:
         for bad in (
@@ -276,8 +466,8 @@ class ConsoleSessionTests(unittest.TestCase):
             self.assertIn(b"stale banner", stale)
 
             session.send("display version")
-            sent = _pump(peer_read, len(b"display version\r\n"))
-            self.assertEqual(sent, b"display version\r\n")
+            sent = _pump(peer_read, len(b"display version\r"))
+            self.assertEqual(sent, b"display version\r")
 
             os.write(peer_write, b"Version 7.1.064\r\n")
             output = session.read_until_idle(idle_gap=0.15, timeout=2.0)
@@ -304,6 +494,125 @@ class ConsoleSessionTests(unittest.TestCase):
             os.close(peer_write)
         self.assertEqual(output, b"")
         self.assertGreaterEqual(elapsed, 0.35)
+
+
+class TelnetBridgeTests(unittest.TestCase):
+    """The transport HCL actually publishes for a device console.
+
+    A loopback server reproduces what SimwareClient's telnet bridge does:
+    announce options, escape ``IAC`` in device output, and echo the line.
+    """
+
+    def setUp(self) -> None:
+        self.server = TelnetBridgeServer(
+            greeting=bytes([IAC, WILL, 1]) + bytes([IAC, WILL, 3]) + bytes([IAC, DO, 0]),
+            reply=b"Version 7.1.064, Release 0427P22\r\n<H3C>",
+        )
+        self.server.start()
+
+    def tearDown(self) -> None:
+        self.server.close()
+
+    def test_negotiation_is_answered_and_stripped_from_output(self) -> None:
+        session = open_telnet("127.0.0.1", self.server.port, timeout=2.0)
+        try:
+            session.drain()
+            session.send("display version")
+            output = session.read_until_idle(idle_gap=0.15, timeout=3.0)
+        finally:
+            session.close()
+        self.assertIn(b"Version 7.1.064", output)
+        self.assertNotIn(bytes([IAC]), output)
+        self.assertEqual(self.server.received, [b"display version\r\n"])
+        # WILL ECHO -> DO ECHO, WILL SGA -> DO SGA, DO BINARY -> WONT BINARY.
+        self.assertIn(bytes([IAC, DO, 1]), self.server.negotiation)
+        self.assertIn(bytes([IAC, DO, 3]), self.server.negotiation)
+        self.assertIn(bytes([IAC, WONT, 0]), self.server.negotiation)
+
+    def test_iac_in_a_command_is_doubled_so_it_cannot_be_a_telnet_command(self) -> None:
+        session = open_telnet("127.0.0.1", self.server.port, timeout=2.0)
+        try:
+            session.drain()
+            session.send_raw(b"a" + bytes([IAC]) + b"b")
+            deadline = time.monotonic() + 3.0
+            while bytes([IAC, IAC]) not in self.server.raw and time.monotonic() < deadline:
+                time.sleep(0.02)
+        finally:
+            session.close()
+        self.assertIn(b"a" + bytes([IAC, IAC]) + b"b", bytes(self.server.raw))
+
+    def test_doubled_iac_in_device_output_is_collapsed(self) -> None:
+        session = open_telnet("127.0.0.1", self.server.port, timeout=2.0)
+        try:
+            session.drain()
+            self.server.push_raw(bytes([IAC, IAC]))
+            output = session.read_until_idle(idle_gap=0.15, timeout=3.0)
+        finally:
+            session.close()
+        self.assertEqual(output, bytes([IAC]))
+
+    def test_unreachable_port_is_a_console_error_not_a_crash(self) -> None:
+        closed = TelnetBridgeServer(greeting=b"", reply=b"")
+        port = closed.reserve_port()
+        with self.assertRaises(ConsoleError) as caught:
+            open_telnet("127.0.0.1", port, timeout=0.3)
+        self.assertEqual(caught.exception.code, "console_unreachable")
+        self.assertEqual(caught.exception.detail["stage"], "open")
+
+
+class TelnetConsoleRunTests(unittest.TestCase):
+    def test_telnet_endpoint_is_used_for_a_topology_device(self) -> None:
+        server = TelnetBridgeServer(
+            greeting=bytes([IAC, WILL, 1]), reply=b"Version 7.1.064\r\n<H3C>"
+        )
+        server.start()
+        try:
+            console = HclConsole(
+                open_timeout=2.0, idle_gap=0.3, read_timeout=5.0, writes_enabled=True
+            )
+            endpoint_url = f"telnet://127.0.0.1:{server.port}"
+            result = console.run(endpoint_url, "display version", expect="Version")
+        finally:
+            server.close()
+        self.assertEqual(result["status"], "output_received")
+        self.assertIn("Version 7.1.064", result["output"])
+        self.assertTrue(result["expect_found"])
+        self.assertEqual(result["device"], server.port - 30000)
+        self.assertEqual(result["verified_scope"], "console_channel_text_readback_only")
+        self.assertEqual(result["evidence"][0]["layer"], "console_telnet")
+        self.assertFalse(result["guest_boot_verified"])
+
+    def test_a_telnet_result_reports_its_transport_and_declared_topology(self) -> None:
+        server = TelnetBridgeServer(
+            greeting=bytes([IAC, WILL, 1]), reply=b"Version 7.1.064\r\n<H3C>"
+        )
+        server.start()
+        try:
+            console = HclConsole(
+                open_timeout=2.0, idle_gap=0.3, read_timeout=5.0, writes_enabled=True
+            )
+            endpoint_url = f"telnet://127.0.0.1:{server.port}"
+            result = console.run(
+                endpoint_url, "display version", expect="Version", topology_hint="topo1"
+            )
+        finally:
+            server.close()
+        # A telnet endpoint carries no topology name, so the caller's hint is
+        # echoed but marked as declared rather than observed.
+        self.assertEqual(result["transport"], "telnet")
+        self.assertEqual(result["topology"], "topo1")
+        self.assertEqual(result["topology_source"], "declared")
+
+    def test_a_pipe_result_reports_the_topology_observed_in_the_endpoint(self) -> None:
+        console = HclConsole(open_timeout=0.4, writes_enabled=True)
+        result = console.run(
+            "\\\\.\\pipe\\mcphcltest-absent-device9",
+            "display version",
+            topology_hint="ignored",
+        )
+        # Even a failed open reports which channel was addressed; the declared
+        # hint never overrides a topology the endpoint itself carries.
+        self.assertEqual(result["endpoint"], "\\\\.\\pipe\\mcphcltest-absent-device9")
 
 
 @WINDOWS_ONLY

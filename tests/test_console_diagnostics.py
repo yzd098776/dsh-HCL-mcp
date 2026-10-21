@@ -113,8 +113,8 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "write_timeout")
         self.assertEqual(caught.exception.detail["bytes_written"], 2)
         self.assertEqual(caught.exception.detail["command_outcome"], "unknown")
-        self.assertEqual(calls[0], b"display version\r\n")
-        self.assertTrue(all(data == b"splay version\r\n" for data in calls[1:]))
+        self.assertEqual(calls[0], b"display version\r")
+        self.assertTrue(all(data == b"splay version\r" for data in calls[1:]))
 
     def test_missing_echo_and_rejection_are_failure_receipts(self):
         for reply, reason in (
@@ -177,6 +177,30 @@ class DiagnosticTests(unittest.TestCase):
                     self.assertFalse((root / "output-b").exists())
                 finally:
                     first.close()
+
+    def test_native_lease_root_override_moves_the_lock(self):
+        """A host whose profile is unwritable passes an explicit lease root."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile = root / "profile"
+            profile.mkdir()
+            moved = root / "workspace" / "console-leases"
+            session = ScriptedSession(lambda c: [])
+            with (
+                patch("mcp_hcl.cli_session.Path.home", return_value=profile),
+                patch(
+                    "subprocess.run",
+                    return_value=SimpleNamespace(returncode=0, stdout=b"false"),
+                ),
+                patch("mcp_hcl.cli_session.open_console_pipe", return_value=-1),
+                patch("mcp_hcl.cli_session.ConsoleSession", return_value=session),
+            ):
+                channel = PersistentConsole(self.pipe, root / "output", native_lease_root=moved)
+                try:
+                    self.assertTrue(moved.is_dir())
+                    self.assertFalse((profile / ".mcp_hcl").exists())
+                finally:
+                    channel.close()
 
 
 class PublicDiagnosticTests(unittest.IsolatedAsyncioTestCase):

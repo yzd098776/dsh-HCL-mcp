@@ -1,24 +1,34 @@
 """Request-correlated console access to one HCL device.
 
-HCL serves each device console on a **Windows named pipe**:
+HCL exposes each device console twice, and only one of the two is usable by a
+third party:
 
-* the name comes from the backend's ``create_udp`` reply and is
-  ``\\\\.\\pipe\\<topology>-device<N>`` (observed: ``\\\\.\\pipe\\topo1-device6``);
-* HCL's own console window is PuTTY in **serial** mode pointed at that pipe
-  (``D:\\HCL\\sessions\\default_conf``: ``Protocol=serial``, ``PortNumber\\115200``).
+* a **Windows named pipe** ``\\\\.\\pipe\\<topology>-device<N>``. The guest side
+  only ever *writes* into it and HCL's own bridge keeps the sole read handle, so
+  ``CreateFileW`` against it returns ``ERROR_PIPE_BUSY`` for a read request and
+  ``ERROR_ACCESS_DENIED`` for a read/write request (measured, not inferred).
+* a **telnet bridge** on ``127.0.0.1:(30000 + N)``. ``HCL.log`` records it
+  directly: ``create_telnet_server success strPipeName:\\\\.\\pipe\\topo1-device1,
+  telnet_port:30001``. Every one of the 240 bridge creations in the local logs
+  follows ``device<N> -> 30000 + N``. This is the channel HCL's own console
+  window and the shipped PuTTY shortcut actually drive.
 
-So the CLI channel is a byte stream over a named pipe: no window automation and
-no keystroke synthesis are involved.
+So the CLI channel is a telnet byte stream: no window automation and no
+keystroke synthesis are involved. The pipe transport is kept because it is the
+honest lower bound — it fails with a *reported* reason instead of silently
+pretending to work.
 
 Design rules enforced here:
 
-* only pipe names matching the observed HCL pattern are accepted, so this can
-  never be pointed at an arbitrary host pipe;
-* the descriptors are opened non-blocking and polled, so there is no reader
-  thread whose ``close`` could deadlock (verified on Windows 11 / Python 3.12:
-  ``os.set_blocking`` works on both anonymous and named pipes);
+* only endpoints matching an observed HCL shape are accepted (a pipe name from
+  the pipe pattern, or a loopback telnet port in ``30001..31024``), so this can
+  never be pointed at an arbitrary host service;
+* sockets are non-blocking and polled, so there is no reader thread whose
+  ``close`` could deadlock;
 * output that arrived *before* the command is drained and reported, so stale
-  console text can never be mistaken for this request's answer;
+  console text can never be mistaken for this request's answer. This matters
+  more over telnet: HCL multiplexes every client onto the one console, so a
+  second reader sees this session's traffic and vice versa;
 * writes are refused unless the process opted in with ``MCP_HCL_ALLOW_LIVE_WRITE=1``;
 * a successful read proves the **console channel** works, never that the guest
   booted, that a command was accepted, or that the network is reachable.
@@ -31,6 +41,7 @@ import hashlib
 import math
 import os
 import re
+import socket
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -43,8 +54,26 @@ PIPE_PATTERN = re.compile(
     r"^\\\\\.\\pipe\\(?P<topology>[A-Za-z0-9_.-]{1,64})-device(?P<device>[0-9]{1,4})$"
 )
 
+#: ``telnet://127.0.0.1:<30000 + N>`` as recorded by HCL's own bridge log.
+TELNET_PATTERN = re.compile(r"^telnet://(?P<host>127\.0\.0\.1|localhost):(?P<port>[0-9]{4,5})$")
+TELNET_BASE_PORT = 30000
+TELNET_HOST = "127.0.0.1"
+
+#: Telnet protocol bytes (RFC 854). HCL's bridge opens with WILL ECHO,
+#: WILL SUPPRESS-GO-AHEAD and DO BINARY.
+IAC = 255
+DONT = 254
+DO = 253
+WONT = 252
+WILL = 251
+SB = 250
+SE = 240
+
 MAX_OUTPUT_BYTES = 256 * 1024
 _POLL_SECONDS = 0.02
+
+#: A Comware prompt at the end of the stream: ``<H3C>`` or ``[H3C-lan1]``.
+_PROMPT_HINT = re.compile(r"(?:<[^<>\r\n]{1,128}>|\[[^\[\]\r\n]{1,160}\])\s*$")
 
 
 class ConsoleError(RuntimeError):
@@ -190,27 +219,63 @@ def _open_pipe_descriptor(pipe_name: str) -> int:
         raise _os_error(exc, stage="descriptor", api="open_osfhandle") from exc
 
 
-def endpoint(topology: str, device: int) -> str:
-    """Build the observed pipe name for one device, validating both parts."""
+def _validate_device_parts(topology: str, device: int) -> None:
     if not isinstance(topology, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", topology):
         raise ConsoleError("topology must match [A-Za-z0-9_.-]{1,64}")
     if isinstance(device, bool) or not isinstance(device, int) or not 1 <= device <= 1024:
         raise ConsoleError("device must be an integer between 1 and 1024")
+
+
+def endpoint(topology: str, device: int) -> str:
+    """Build the observed pipe name for one device, validating both parts."""
+    _validate_device_parts(topology, device)
     return f"\\\\.\\pipe\\{topology}-device{device}"
 
 
+def telnet_endpoint(topology: str, device: int) -> str:
+    """Build the telnet endpoint HCL bridges that pipe onto (``30000 + N``)."""
+    _validate_device_parts(topology, device)
+    return f"telnet://{TELNET_HOST}:{TELNET_BASE_PORT + device}"
+
+
+def resolve_endpoint(topology: str, device: int) -> str:
+    """Default device endpoint: the telnet bridge, the channel that works."""
+    return telnet_endpoint(topology, device)
+
+
 def describe(pipe_name: str) -> dict[str, Any]:
-    """Split a pipe name into its topology and device, or refuse it."""
-    match = PIPE_PATTERN.fullmatch(pipe_name or "")
-    if match is None:
-        raise ConsoleError(
-            "Only HCL console pipes of the form \\\\.\\pipe\\<topology>-device<N> are accepted"
-        )
-    return {
-        "pipe": pipe_name,
-        "topology": match.group("topology"),
-        "device": int(match.group("device")),
-    }
+    """Split a console endpoint into its topology and device, or refuse it."""
+    text = pipe_name or ""
+    match = PIPE_PATTERN.fullmatch(text)
+    if match is not None:
+        return {
+            "pipe": text,
+            "endpoint": text,
+            "transport": "named_pipe",
+            "topology": match.group("topology"),
+            "device": int(match.group("device")),
+        }
+    telnet = TELNET_PATTERN.fullmatch(text)
+    if telnet is not None:
+        port = int(telnet.group("port"))
+        device = port - TELNET_BASE_PORT
+        if not 1 <= device <= 1024:
+            raise ConsoleError(
+                "Telnet console ports must lie in 30001..31024 (HCL assigns 30000 + device number)"
+            )
+        return {
+            "pipe": text,
+            "endpoint": text,
+            "transport": "telnet",
+            "host": telnet.group("host"),
+            "port": port,
+            "topology": None,
+            "device": device,
+        }
+    raise ConsoleError(
+        "Only HCL console endpoints are accepted: \\\\.\\pipe\\<topology>-device<N> "
+        "or telnet://127.0.0.1:<30001..31024>"
+    )
 
 
 def _validate_command(command: str) -> str:
@@ -225,38 +290,33 @@ def _validate_command(command: str) -> str:
     return command.strip()
 
 
-class ConsoleSession:
-    """Non-blocking, line-oriented session over pipe file descriptors.
+class _PolledSession:
+    """Non-blocking, polled console byte stream shared by both transports.
 
-    Descriptors are injected so the protocol logic can be tested with anonymous
-    pipes; :func:`open_console_pipe` is the only OS-specific part.
+    Subclasses supply :meth:`_read_available` and :meth:`send_raw`. Polling is
+    used instead of a reader thread so ``close`` can never deadlock.
     """
 
     def __init__(
         self,
-        read_fd: int,
-        write_fd: int | None = None,
         *,
         max_bytes: int = MAX_OUTPUT_BYTES,
         write_timeout: float = 4.0,
     ) -> None:
-        self._read_fd = read_fd
-        self._write_fd = read_fd if write_fd is None else write_fd
         self._max_bytes = max_bytes
         self._closed = False
         self.write_timeout = write_timeout
         self.partial_output = b""
         self.read_termination: str | None = None
         self.last_write_bytes = 0
+        self.wakeup_output = b""
 
     # ------------------------------------------------------------------ io
     def _read_available(self) -> bytes:
-        try:
-            return os.read(self._read_fd, 65536)
-        except BlockingIOError:
-            return b""
-        except OSError as exc:
-            raise _os_error(exc, stage="read", api="os.read") from exc
+        raise NotImplementedError
+
+    def send_raw(self, payload: bytes) -> None:
+        raise NotImplementedError
 
     def drain(self) -> bytes:
         """Discard and return everything already buffered (the 'stale output')."""
@@ -313,7 +373,44 @@ class ConsoleSession:
         return bytes(collected)
 
     def send(self, command: str) -> None:
-        payload = (_validate_command(command) + "\r\n").encode("ascii", errors="strict")
+        # A bare CR is the line ending HCL's console bridge expects: CRLF makes
+        # Comware answer with an extra empty prompt, which then lands inside the
+        # next readback body (for example after the last line of a VLAN block).
+        payload = (_validate_command(command) + "\r").encode("ascii", errors="strict")
+        self.send_raw(payload)
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+
+class ConsoleSession(_PolledSession):
+    """Line-oriented session over pipe file descriptors.
+
+    Descriptors are injected so the protocol logic can be tested with anonymous
+    pipes; :func:`open_console_pipe` is the only OS-specific part.
+    """
+
+    def __init__(
+        self,
+        read_fd: int,
+        write_fd: int | None = None,
+        *,
+        max_bytes: int = MAX_OUTPUT_BYTES,
+        write_timeout: float = 4.0,
+    ) -> None:
+        super().__init__(max_bytes=max_bytes, write_timeout=write_timeout)
+        self._read_fd = read_fd
+        self._write_fd = read_fd if write_fd is None else write_fd
+
+    def _read_available(self) -> bytes:
+        try:
+            return os.read(self._read_fd, 65536)
+        except BlockingIOError:
+            return b""
+        except OSError as exc:
+            raise _os_error(exc, stage="read", api="os.read") from exc
+
+    def send_raw(self, payload: bytes) -> None:
         deadline = time.monotonic() + self.write_timeout
         offset = 0
         self.last_write_bytes = 0
@@ -360,6 +457,233 @@ class ConsoleSession:
                 os.close(descriptor)
             except OSError:
                 pass
+
+
+class TelnetSession(_PolledSession):
+    """Console session over HCL's telnet bridge (``30000 + device``).
+
+    Telnet negotiation is answered inline: HCL's bridge announces WILL ECHO,
+    WILL SUPPRESS-GO-AHEAD and DO BINARY, and a client that ignores the
+    negotiation still receives data but cannot rely on the byte stream being
+    unescaped. Every ``IAC`` in device output is doubled by the bridge, so it is
+    un-doubled here before the text is handed on.
+    """
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        *,
+        max_bytes: int = MAX_OUTPUT_BYTES,
+        write_timeout: float = 4.0,
+    ) -> None:
+        super().__init__(max_bytes=max_bytes, write_timeout=write_timeout)
+        self._sock = sock
+        self._pending = bytearray()
+
+    # ------------------------------------------------------------ transport
+    def _read_raw(self) -> bytes:
+        try:
+            return self._sock.recv(65536)
+        except (BlockingIOError, socket.timeout):
+            return b""
+        except OSError as exc:
+            raise ConsoleError(
+                f"Console read failed: {exc.__class__.__name__}",
+                code="console_io_failed",
+                detail={
+                    "stage": "read",
+                    "api": "socket.recv",
+                    "winerror": getattr(exc, "winerror", None),
+                    "errno": getattr(exc, "errno", None),
+                },
+            ) from exc
+
+    def _negotiate(self, data: bytes) -> bytes:
+        """Strip telnet commands, answering options, and un-double IAC."""
+        payload = bytearray()
+        replies = bytearray()
+        index = 0
+        size = len(data)
+        while index < size:
+            byte = data[index]
+            if byte != IAC:
+                payload.append(byte)
+                index += 1
+                continue
+            if index + 1 >= size:
+                break
+            command = data[index + 1]
+            if command == IAC:
+                payload.append(IAC)
+                index += 2
+                continue
+            if command in (DO, DONT, WILL, WONT):
+                if index + 2 >= size:
+                    break
+                option = data[index + 2]
+                if command == DO:
+                    replies += bytes([IAC, WONT, option])
+                elif command == WILL:
+                    replies += bytes([IAC, DO, option])
+                else:
+                    replies += bytes([IAC, WONT, option])
+                index += 3
+                continue
+            if command == SB:
+                end = data.find(bytes([IAC, SE]), index)
+                index = size if end < 0 else end + 2
+                continue
+            index += 2
+        if replies:
+            try:
+                # The socket is non-blocking, so a negotiation reply needs the
+                # same polled write path as a command rather than sendall.
+                self._send_polled(bytes(replies))
+            except ConsoleError:
+                # A failed negotiation reply never invalidates the read.
+                pass
+        return bytes(payload)
+
+    def _send_polled(self, payload: bytes, *, timeout: float = 1.0) -> None:
+        deadline = time.monotonic() + timeout
+        offset = 0
+        while offset < len(payload):
+            if time.monotonic() >= deadline:
+                raise ConsoleError(
+                    "Telnet negotiation write timed out",
+                    code="write_timeout",
+                    detail={"stage": "negotiate", "bytes_written": offset},
+                )
+            try:
+                sent = self._sock.send(payload[offset:])
+            except (BlockingIOError, socket.timeout):
+                time.sleep(_POLL_SECONDS)
+                continue
+            if sent == 0:
+                raise ConsoleError(
+                    "Console channel closed during negotiation",
+                    code="pipe_broken",
+                    detail={"stage": "negotiate", "bytes_written": offset},
+                )
+            offset += sent
+
+    def _read_available(self) -> bytes:
+        return self._negotiate(self._read_raw())
+
+    def send_raw(self, payload: bytes) -> None:
+        # Escape IAC so a command byte can never be read as a telnet command.
+        escaped = payload.replace(bytes([IAC]), bytes([IAC, IAC]))
+        deadline = time.monotonic() + self.write_timeout
+        offset = 0
+        self.last_write_bytes = 0
+        while offset < len(escaped):
+            if time.monotonic() >= deadline:
+                raise ConsoleError(
+                    "Console partial write timed out",
+                    code="write_timeout",
+                    detail={
+                        "stage": "write",
+                        "bytes_written": offset,
+                        "command_outcome": "unknown" if offset else "not_sent",
+                    },
+                )
+            try:
+                sent = self._sock.send(escaped[offset:])
+                if sent == 0:
+                    raise ConsoleError(
+                        "Console channel closed during write",
+                        code="pipe_broken",
+                        detail={
+                            "stage": "write",
+                            "bytes_written": offset,
+                            "command_outcome": "unknown" if offset else "not_sent",
+                        },
+                    )
+                offset += sent
+                self.last_write_bytes = offset
+            except (BlockingIOError, socket.timeout):
+                time.sleep(_POLL_SECONDS)
+            except OSError as exc:
+                failure = ConsoleError(
+                    f"Console write failed: {exc.__class__.__name__}",
+                    code="console_io_failed",
+                    detail={
+                        "stage": "write",
+                        "api": "socket.send",
+                        "winerror": getattr(exc, "winerror", None),
+                        "errno": getattr(exc, "errno", None),
+                        "bytes_written": offset,
+                        "command_outcome": "unknown" if offset else "not_sent",
+                    },
+                )
+                raise failure from exc
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
+def open_telnet(host: str, port: int, *, timeout: float = 2.0) -> TelnetSession:
+    """Connect to one HCL telnet bridge and wake the guest console.
+
+    The guest parks at ``Press ENTER to get started.`` until it receives a line
+    ending, so a bare newline is sent once. That newline is the only byte this
+    function writes; it cannot change device configuration.
+    """
+    if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout < 0:
+        raise ConsoleError("Open timeout must be finite and nonnegative", code="invalid_timeout")
+    try:
+        sock = socket.create_connection((host, port), timeout=max(timeout, 0.5))
+    except OSError as exc:
+        raise ConsoleError(
+            f"Console connect failed: {exc.__class__.__name__}",
+            code="console_unreachable",
+            detail={
+                "stage": "open",
+                "api": "socket.create_connection",
+                "host": host,
+                "port": port,
+                "winerror": getattr(exc, "winerror", None),
+                "errno": getattr(exc, "errno", None),
+            },
+        ) from exc
+    sock.setblocking(False)
+    session = TelnetSession(sock)
+    try:
+        # Answer the greeting so the bridge's option state is settled.
+        deadline = time.monotonic() + min(timeout, 2.0)
+        while time.monotonic() < deadline:
+            if session._read_available():
+                break
+            time.sleep(_POLL_SECONDS)
+        # A freshly booted guest parks at "Press ENTER to get started." and only
+        # prints its prompt after a line ending arrives. Wait for that prompt
+        # here, so the caller's first command is not attributed to the wake-up
+        # banner. The newline is the only byte written and cannot configure
+        # anything; each retry is bounded and the loop stops at ``timeout``.
+        wakeup = bytearray()
+        settle_deadline = time.monotonic() + max(timeout, 0.5)
+        for _ in range(3):
+            session.send_raw(b"\r\n")
+            wakeup.extend(
+                session.read_until_idle(
+                    idle_gap=0.3, timeout=max(settle_deadline - time.monotonic(), 0.1)
+                )
+            )
+            if _PROMPT_HINT.search(_decode(bytes(wakeup))[0].replace("\r", "")):
+                break
+            if time.monotonic() >= settle_deadline:
+                break
+        session.wakeup_output = bytes(wakeup)
+    except ConsoleError:
+        session.close()
+        raise
+    return session
 
 
 def open_console_pipe(pipe_name: str, *, timeout: float = 2.0) -> int:
@@ -419,9 +743,22 @@ class HclConsole:
     settle_seconds: float = 0.25
     writes_enabled: bool = False
     lease_root: Path | None = None
+    native_lease_root: Path | None = None
 
-    def run(self, pipe_name: str, command: str, *, expect: str | None = None) -> dict[str, Any]:
-        """Send one command and return only the output that followed it."""
+    def run(
+        self,
+        pipe_name: str,
+        command: str,
+        *,
+        expect: str | None = None,
+        topology_hint: str | None = None,
+    ) -> dict[str, Any]:
+        """Send one command and return only the output that followed it.
+
+        A telnet endpoint carries no topology name, so a caller that resolved it
+        from a project passes ``topology_hint``; the result marks it as declared
+        rather than observed.
+        """
         operation_id = uuid4().hex
         result: dict[str, Any] = {
             "status": "rejected",
@@ -470,11 +807,22 @@ class HclConsole:
                     timeout=self.read_timeout,
                     max_bytes=MAX_OUTPUT_BYTES,
                     open_timeout=self.open_timeout,
+                    native_lease_root=self.native_lease_root,
                 ) as channel:
                     reply = channel.exchange(command)
                     sent = True
                     raw = base64.b64decode(reply["raw_output_b64"])
                     stale = b"0" * reply["discarded_stale_bytes"]
+            elif location["transport"] == "telnet":
+                # HCL bridges each device pipe onto telnet; the pipe itself is
+                # held open read-only by SimwareClient, so telnet is the only
+                # channel a second process can actually write to.
+                session = open_telnet(location["host"], location["port"], timeout=self.open_timeout)
+                time.sleep(min(self.settle_seconds, self.idle_gap))
+                stale = session.drain()
+                session.send(command)
+                sent = True
+                raw = session.read_until_idle(idle_gap=self.idle_gap, timeout=self.read_timeout)
             else:
                 descriptor = open_console_pipe(pipe_name, timeout=self.open_timeout)
                 session = ConsoleSession(descriptor)
@@ -510,7 +858,11 @@ class HclConsole:
         result.update(
             {
                 "status": "output_received" if raw else "no_output",
-                "topology": location["topology"],
+                "topology": location["topology"] or topology_hint,
+                "topology_source": "endpoint"
+                if location["topology"]
+                else ("declared" if topology_hint else None),
+                "transport": location["transport"],
                 "device": location["device"],
                 "discarded_stale_bytes": len(stale),
                 "output_bytes": len(raw),
@@ -528,7 +880,7 @@ class HclConsole:
                 "evidence": [
                     {
                         "source": pipe_name,
-                        "layer": "console_pipe",
+                        "layer": f"console_{location['transport']}",
                         "request_sha256": hashlib.sha256(
                             command.encode("ascii", "replace")
                         ).hexdigest(),

@@ -450,10 +450,12 @@ def collect_evidence(spec_data: dict, output: Path) -> dict:
             }
             if native and device.control_kind == "comware":
                 from mcp_hcl.cli_session import PersistentConsole
-                from mcp_hcl.console import endpoint
+                from mcp_hcl.console import resolve_endpoint
                 from mcp_hcl.deployment import config_text
 
-                pipe = endpoint(spec.topology, row["device_id"])
+                # The device pipe is read-exclusively by HCL's SimwareClient, which
+                # republishes it as the telnet console HCL's own GUI uses.
+                pipe = resolve_endpoint(spec.topology, row["device_id"])
                 from mcp_hcl.console import ConsoleError
 
                 channel = None

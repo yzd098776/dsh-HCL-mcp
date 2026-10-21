@@ -137,7 +137,9 @@ class NetworkFixture(unittest.TestCase):
             native_channel = True
 
             def __init__(self, pipe):
-                self.identifier = "r1" if pipe.endswith("device3") else "r2"
+                # The live console is the telnet bridge (30000 + device number),
+                # so the fixture maps devices by the port it is asked to open.
+                self.identifier = "r1" if pipe.endswith(":30003") else "r2"
                 self.history = []
                 test.opens[self.identifier] = test.opens.get(self.identifier, 0) + 1
 

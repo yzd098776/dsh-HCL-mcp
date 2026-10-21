@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from mcp_hcl.cli_session import PROMPT, PersistentConsole, clean_text
-from mcp_hcl.console import ConsoleError, endpoint
+from mcp_hcl.console import ConsoleError, resolve_endpoint
 from mcp_hcl.deployment import Deployment
 from mcp_hcl.gui_relay import rejected
 from mcp_hcl.readback import ReadbackError, interface_states, qos_definitions, vlan_database
@@ -118,7 +118,9 @@ class Inspection:
                 for identifier, binding in selected
             }
             for identifier, binding in selected:
-                pipe = endpoint(topology, binding["device_id"])
+                # The device pipe is read-exclusively by HCL's SimwareClient, which
+                # republishes it as the telnet console HCL's own GUI uses.
+                pipe = resolve_endpoint(topology, binding["device_id"])
                 channel = self.session_factory(pipe)
                 channels.append((identifier, channel))
                 with channel:

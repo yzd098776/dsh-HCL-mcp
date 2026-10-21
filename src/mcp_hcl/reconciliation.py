@@ -16,7 +16,7 @@ from pydantic import Field, ValidationError
 
 from mcp_hcl.address_observation import interface_domains, ipv6_interfaces
 from mcp_hcl.cli_session import PersistentConsole
-from mcp_hcl.console import ConsoleError, endpoint
+from mcp_hcl.console import ConsoleError, resolve_endpoint
 from mcp_hcl.contracts import validation_errors
 from mcp_hcl.deployment import Deployment
 from mcp_hcl.gui_relay import rejected
@@ -307,7 +307,7 @@ class Reconciliation:
         if type(include_ipv6) is not bool:
             return rejected("invalid_ipv6_option", "include_ipv6 must be a boolean")
         try:
-            endpoint(topology, 1)
+            resolve_endpoint(topology, 1)
             typed = TopologyPlan.model_validate(plan) if kind == "diff" else None
         except ValidationError as exc:
             return {
@@ -410,7 +410,9 @@ class Reconciliation:
                     continue
                 try:
                     remaining = budget.remaining()
-                    pipe = endpoint(topology, binding["device_id"])
+                    # HCL republishes the device pipe as a telnet console; the pipe
+                    # itself is held read-exclusively by SimwareClient.
+                    pipe = resolve_endpoint(topology, binding["device_id"])
                     active = (
                         self.session_factory(pipe)
                         if self.session_factory
@@ -504,7 +506,7 @@ class Reconciliation:
                             raise ReadbackError(
                                 "Identity changed before the routing-domain observation"
                             )
-                        pipe = endpoint(topology, bindings[identifier]["device_id"])
+                        pipe = resolve_endpoint(topology, bindings[identifier]["device_id"])
                         remaining = budget.remaining()
                         active = (
                             self.session_factory(pipe)

@@ -15,8 +15,8 @@ from mcp_hcl.acl_semantics import (
     verify_acl,
     without_acl_definitions,
 )
-from mcp_hcl.cli_session import PROMPT, PersistentConsole
-from mcp_hcl.console import ConsoleError, endpoint
+from mcp_hcl.cli_session import PROMPT, PersistentConsole, ensure_user_view
+from mcp_hcl.console import ConsoleError, resolve_endpoint
 from mcp_hcl.gui_relay import rejected
 from mcp_hcl.runtime_binding import RuntimeBinding
 from mcp_hcl.services import Acl
@@ -117,7 +117,9 @@ class Deployment:
         self.session_factory = session_factory or (
             lambda pipe: PersistentConsole(pipe, store.output_root / ".console-leases")
         )
-        self.runtime = RuntimeBinding()
+        self.runtime = RuntimeBinding(
+            log_root=(Path(self.catalog.installation) / "Log" / "HCLLog" if self.catalog else None)
+        )
         self.startup = StartupConfig(config_text)
 
     def open_channel(self, document, binding, topology, expected_uuid=None):
@@ -126,7 +128,10 @@ class Deployment:
             raise ConsoleError(
                 "Recovery target VM identity changed", code="recovery_target_changed"
             )
-        channel = self.session_factory(endpoint(topology, binding["device_id"]))
+        # HCL's SimwareClient holds the device pipe's only read handle and
+        # republishes the console as telnet 30000 + device, so the live console is
+        # the telnet endpoint; the pipe name itself is never openable here.
+        channel = self.session_factory(resolve_endpoint(topology, binding["device_id"]))
         if target is not None:
             try:
                 channel.target_identity = self.runtime.verify_pipe(channel, target)
@@ -171,7 +176,7 @@ class Deployment:
         return directory
 
     def _backup(self, channel, device, directory, operation, on_saved=None):
-        channel.exchange("return")
+        ensure_user_view(channel)
         channel.exchange("screen-length disable")
         startup = self.startup.capture(channel, directory, device)
         before = config_text(channel.exchange("display current-configuration")["output"])
@@ -203,7 +208,7 @@ class Deployment:
         record["protocol_running_backup_verified"] = True
         channel.exchange("system-view")
         channel.exchange(f"configuration replace file {guest}", confirmation="N")
-        channel.exchange("return")
+        ensure_user_view(channel)
         restored = config_text(channel.exchange("display current-configuration")["output"])
         if digest(before) != digest(restored):
             raise ConsoleError("Native restore preflight failed to reproduce the baseline")
@@ -213,13 +218,13 @@ class Deployment:
         return record
 
     def _restore(self, channel, backup):
-        channel.exchange("return")
+        ensure_user_view(channel)
         if backup.get(
             "protocol_running_backup_verified", backup.get("restore_test_verified", False)
         ):
             channel.exchange("system-view")
             channel.exchange(f"configuration replace file {backup['guest_file']}", confirmation="N")
-        channel.exchange("return")
+        ensure_user_view(channel)
         current = config_text(channel.exchange("display current-configuration")["output"])
         if digest(current) != backup["sha256"]:
             raise ConsoleError("Restored running configuration does not match the baseline")

@@ -6,6 +6,7 @@ import hashlib
 import re
 from pathlib import Path
 
+from mcp_hcl.cli_session import ensure_user_view
 from mcp_hcl.console import ConsoleError
 
 
@@ -62,7 +63,7 @@ class StartupConfig:
     def capture(self, channel, directory, prefix):
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", prefix):
             raise ValueError("Invalid startup receipt prefix")
-        channel.exchange("return")
+        ensure_user_view(channel)
         state = self.state(channel)
         files = {}
         for index, name in enumerate(
@@ -115,7 +116,7 @@ class StartupConfig:
 
     def persist(self, channel, record, current, guest_file):
         file_url(guest_file)
-        channel.exchange("return")
+        ensure_user_view(channel)
         self.verify(channel, record)
         channel.exchange("save " + guest_file, confirmation=True)
         written = self.parse_configuration(channel.exchange("more " + guest_file)["output"])
@@ -153,7 +154,7 @@ class StartupConfig:
 
     def restore(self, channel, record, directory):
         self.validate(record, directory)
-        channel.exchange("return")
+        ensure_user_view(channel)
         self.verify_files(channel, record)
         if self.state(channel) != record["state"]:
             # The vendor command clears pointers without deleting files.

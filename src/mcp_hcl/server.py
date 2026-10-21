@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_hcl import __version__
+from mcp_hcl import __version__, dsh_compat
 from mcp_hcl import console as hcl_console
 from mcp_hcl.api_compatibility import api_compatibility_report
 from mcp_hcl.artifact_store import ArtifactRetries
@@ -31,6 +31,20 @@ from mcp_hcl.reconciliation import Reconciliation, register_reconciliation_tools
 from mcp_hcl.security_audit import SecurityAudit, register_security_audit_tool
 from mcp_hcl.topology import validate_plan
 
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def log_level() -> str:
+    """SDK log level for the stdio server, defaulting to WARNING.
+
+    FastMCP logs one ``Processing request of type ...`` line per request at
+    INFO. Under a stdio host such as DeepSeek Harness that noise lands in the
+    host log for every call, so the default is WARNING; set
+    ``MCP_HCL_LOG_LEVEL=INFO`` or ``DEBUG`` when troubleshooting.
+    """
+    level = os.environ.get("MCP_HCL_LOG_LEVEL", "WARNING").strip().upper()
+    return level if level in _LOG_LEVELS else "WARNING"
+
 
 def live_writes_enabled() -> bool:
     """Single master switch for every action that changes HCL or device state."""
@@ -40,6 +54,23 @@ def live_writes_enabled() -> bool:
         "yes",
         "on",
     }
+
+
+def console_lease_root() -> Path:
+    """Directory holding the per-pipe console leases.
+
+    Native console sessions take a per-user endpoint lease so two MCP_HCL
+    processes cannot drive the same device console at once. The default lives
+    under the user profile, which is unreachable for a host that runs the
+    server in a restricted or low-integrity token: there only the host's own
+    workspace is writable, and the ``mkdir`` fails with ``WinError 5``.
+    ``MCP_HCL_CONSOLE_LEASE_ROOT`` moves the leases somewhere the process can
+    actually write; relative paths resolve against the current directory.
+    """
+    configured = os.environ.get("MCP_HCL_CONSOLE_LEASE_ROOT", "").strip()
+    if configured:
+        return Path(configured)
+    return Path.home() / ".mcp_hcl" / "console-leases"
 
 
 def create_store() -> ProjectStore:
@@ -64,7 +95,9 @@ def create_server(
     )
     catalog = catalog or HclCatalog(Path(os.environ.get("MCP_HCL_INSTALL_ROOT", "D:/HCL")))
     console = console or hcl_console.HclConsole(
-        writes_enabled=writes, lease_root=store.output_root / ".console-leases"
+        writes_enabled=writes,
+        lease_root=store.output_root / ".console-leases",
+        native_lease_root=console_lease_root(),
     )
     # The wrapper keys a topology to the TCP connection, so at most one backend
     # session is held at a time: the one hcl_backend_topology opened.
@@ -82,6 +115,11 @@ def create_server(
             "After staging, the user must open the returned .net file in HCL. "
             "A staged result is not a live-canvas result."
         ),
+        # The SDK logs one "Processing request of type ..." line per request at
+        # INFO. Under a stdio host such as DeepSeek Harness that lands in the
+        # host log for every call, so default to WARNING and keep DEBUG/INFO
+        # available through the environment for troubleshooting.
+        log_level=log_level(),
     )
     # FastMCP 1.x has no version constructor argument. Its underlying Server
     # exposes the version used by initialize; keep the handshake project-specific.
@@ -98,6 +136,10 @@ def create_server(
             "gui_activation": "requires opening the staged .net project in HCL",
             "live_canvas_api": "not verified and not exposed",
             "device_start_and_console": "gated primitives; guest and CLI effects unverified",
+            "console_transport": (
+                "telnet bridge on 127.0.0.1:(30000 + device number); the device pipe itself "
+                "is held read-only by HCL's SimwareClient and rejects a second opener"
+            ),
             "output_root": str(store.output_root),
             "live_gate": {"state": "not_passed", "full_live_gate_passed": False},
             "registered_tools": sorted(REGISTERED_TOOLS),
@@ -105,8 +147,9 @@ def create_server(
             "upstream_parity": "incomplete; call hcl_parity_report for the pinned 62-tool inventory",
             "backend_probe": "read-only version and memory; does not prove live canvas control",
             "control_plane": (
-                "observed SimwareWrapper verbs plus a named-pipe device console; every "
-                "state-changing action is disabled unless MCP_HCL_ALLOW_LIVE_WRITE=1"
+                "observed SimwareWrapper verbs plus the telnet device console HCL bridges "
+                "from each device pipe; every state-changing action is disabled unless "
+                "MCP_HCL_ALLOW_LIVE_WRITE=1"
             ),
             "catalog": "local model defaults and port families; runtime firmware unverified",
             "offline_layer": {
@@ -176,13 +219,52 @@ def create_server(
     def ports_resource() -> str:
         return json.dumps(catalog_read(catalog.ports), ensure_ascii=False)
 
+    # The schema resources exist to compensate for the DeepSeek Harness
+    # projection, so they are only advertised when that projection is active.
+    # In the default ``raw`` mode the discovery surface stays exactly the six
+    # pinned catalog resources.
+    if dsh_compat.schema_mode() == "dsh":
+
+        @mcp.resource("hcl://schema/tools")
+        def tool_schemas_resource() -> str:
+            """Full pydantic input schemas, before DeepSeek Harness projection.
+
+            The advertised `tools/list` schemas are projected into the DeepSeek
+            Harness keyword subset, which drops `$defs`/`$ref`/bounds. Read this
+            resource when the exact accepted shape of a payload matters.
+            """
+            raw = mcp.raw_parameters_all()
+            return json.dumps(
+                {
+                    "contract_version": 2,
+                    "schema_mode": dsh_compat.schema_mode(),
+                    "note": (
+                        "Advertised tools/list schemas are projected for DeepSeek Harness; "
+                        "these are the unprojected pydantic schemas used for validation."
+                    ),
+                    "tools": raw,
+                },
+                ensure_ascii=False,
+            )
+
+        @mcp.resource("hcl://schema/tools/{name}")
+        def tool_schema_resource(name: str) -> str:
+            """Unprojected input schema for one tool, addressed by tool name."""
+            raw = mcp.raw_parameters(name)
+            if raw is None:
+                raise ValueError(f"unknown tool: {name}")
+            return json.dumps(raw, ensure_ascii=False)
+
     @mcp.tool()
     async def hcl_parity_report() -> dict[str, Any]:
         """Read the pinned mapping and API differences against current MCP discovery."""
         report = parity_report()
+        # Compare against the unprojected schemas: the parity claim is about the
+        # real argument contract, not the DeepSeek Harness projection of it.
+        raw = mcp.raw_parameters_all()
         report["api_compatibility"] = api_compatibility_report(
             report,
-            {tool.name: tool.inputSchema for tool in await mcp.list_tools()},
+            {tool.name: raw.get(tool.name, tool.inputSchema) for tool in await mcp.list_tools()},
             {str(resource.uri) for resource in await mcp.list_resources()},
         )
         return report
@@ -308,6 +390,10 @@ def create_server(
             "endpoint": {"host": backend.host, "port": backend.port},
             "write_verbs_enabled": backend.allow_writes,
             "console_exec_enabled": console.writes_enabled,
+            "console_transport": (
+                "telnet bridge on 127.0.0.1:(30000 + device number); the device pipe itself "
+                "is held read-only by HCL's SimwareClient and rejects a second opener"
+            ),
             "topology_session_open": session_state["session"] is not None,
             "invocable_count": sum(1 for row in verbs if row["enabled"]),
             "verbs": verbs,
@@ -490,12 +576,14 @@ def create_server(
         device: int | None = None,
         expect: str | None = None,
     ) -> dict[str, Any]:
-        """Send one line to a device console over its HCL named pipe (gated).
+        """Send one line to a device console over HCL's telnet bridge (gated).
 
-        Supply either ``pipe`` (must match HCL's console pipe pattern) or
-        ``topology`` plus ``device``. Output that arrived before the command is
-        drained and reported as ``discarded_stale_bytes`` so stale console text
-        cannot be mistaken for this request's answer.
+        Supply either ``pipe`` (``\\\\.\\pipe\\<topology>-device<N>`` or
+        ``telnet://127.0.0.1:<30001..31024>``) or ``topology`` plus ``device``;
+        the default endpoint for a topology is the telnet bridge HCL publishes
+        for that device. Output that arrived before the command is drained and
+        reported as ``discarded_stale_bytes`` so stale console text cannot be
+        mistaken for this request's answer.
         """
         if pipe is not None and (topology is not None or device is not None):
             return _rejected(
@@ -511,10 +599,10 @@ def create_server(
                     "missing_argument", "Supply either pipe, or topology and device", "console_exec"
                 )
             try:
-                pipe = hcl_console.endpoint(topology, device)
+                pipe = hcl_console.resolve_endpoint(topology, device)
             except hcl_console.ConsoleError as exc:
                 return _rejected("invalid_argument", str(exc), "console_exec")
-        return console.run(pipe, command, expect=expect)
+        return console.run(pipe, command, expect=expect, topology_hint=topology)
 
     register_offline(mcp, catalog, store, catalog_read)
     relay = HclGuiRelay(store, writes_enabled=writes, installation_root=catalog.installation)

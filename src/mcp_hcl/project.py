@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,7 @@ class ProjectError(ValueError):
 _HEADER = re.compile(r"^    \[\[(.+)\]\]\s*$")
 _FIELD = re.compile(r"^        ([^=]+?)\s*=\s*(.*?)\s*$")
 _PORT = re.compile(r"[A-Za-z][A-Za-z0-9_-]*(?:/[0-9]+)+")
+_CLOUD_HEADER = re.compile(r"^\s*\[\[Cloud\s+(.+?)\]\]\s*$")
 _STAGE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,19}")
 _DEVICE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,31}")
 _REQUIRED_FILES = ("project.json", "deviceversion.txt")
@@ -181,6 +183,30 @@ def _read_document(directory: Path) -> ProjectDocument:
     )
 
 
+def _cloud_device_names(metadata: dict[str, Any], lines: list[str]) -> set[str]:
+    """Metadata entries that map to a [[Cloud ...]] terminal, not a [vbox] device.
+
+    HCL lists cloud terminals such as Host_1 in deviceInfoList even though their
+    only block lives under [Non-vBox-DATA] as [[Cloud Host_1]] with no device_id
+    and no configPath. Counting every metadata row would reject those projects,
+    so the .net file itself decides which rows are real virtual devices.
+    """
+    declared = set()
+    for line in lines:
+        match = _CLOUD_HEADER.match(line.rstrip("\r\n"))
+        if match:
+            declared.add(match.group(1))
+    if not declared:
+        return set()
+    return {
+        row["resourceName"]
+        for row in metadata["deviceInfoList"]
+        if isinstance(row.get("resourceName"), str)
+        and row["resourceName"] in declared
+        and not row.get("configPath")
+    }
+
+
 def _insert_field(block: list[str], key: str, value: str, newline: str) -> list[str]:
     for line in block:
         match = _FIELD.match(line.rstrip("\r\n"))
@@ -198,6 +224,16 @@ def _insert_field(block: list[str], key: str, value: str, newline: str) -> list[
 def _check_port(port: str) -> None:
     if not _PORT.fullmatch(port):
         raise ProjectError(f"Invalid port name: {port}")
+
+
+def _discard(tree: Path) -> None:
+    """Remove an abandoned stage without hiding the error that abandoned it."""
+    for path in sorted(tree.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        try:
+            path.chmod(stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
+    shutil.rmtree(tree, ignore_errors=True)
 
 
 class ProjectStore:
@@ -247,8 +283,19 @@ class ProjectStore:
         final_root = self.output_root / stage_name
         if final_root.exists():
             raise ProjectError(f"Stage already exists: {final_root}")
-        self.output_root.mkdir(parents=True, exist_ok=True)
-        temp_root = Path(tempfile.mkdtemp(prefix=".hcl-stage-", dir=self.output_root))
+        try:
+            self.output_root.mkdir(parents=True, exist_ok=True)
+            # A directory taken from the source can be read-only, and read-only files
+            # copied out of it stay read-only, so cleanup has to be able to clear the
+            # flag. Without this a cleanup failure reports PermissionError instead of
+            # the real reason the stage was abandoned.
+            temp_root = Path(tempfile.mkdtemp(prefix=".hcl-stage-", dir=self.output_root))
+        except PermissionError as exc:
+            raise ProjectError(
+                f"Cannot create a stage directory under {self.output_root}: {exc}. "
+                "MCP_HCL_OUTPUT_ROOT must be writable by the process running this server; "
+                "a sandboxed or low-integrity host can write only inside its own workspace."
+            ) from exc
         temp_project = temp_root / doc.directory.name
         try:
             temp_project.mkdir()
@@ -289,7 +336,7 @@ class ProjectStore:
                     shutil.copytree(optional, temp_project / optional_name)
             return temp_root, final_root
         except Exception:
-            shutil.rmtree(temp_root)
+            _discard(temp_root)
             raise
 
     def _commit(
@@ -324,7 +371,15 @@ class ProjectStore:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(content)
             checked = _read_document(temp_project)
-            if len(checked.sections) != len(metadata["deviceInfoList"]):
+            cloud_names = _cloud_device_names(metadata, checked.lines)
+            expected = [
+                row
+                for row in metadata["deviceInfoList"]
+                if not (
+                    isinstance(row.get("resourceName"), str) and row["resourceName"] in cloud_names
+                )
+            ]
+            if len(checked.sections) != len(expected):
                 raise ProjectError("Staged .net and project.json device counts disagree")
             summary = checked.summary()
             operation_id = uuid4().hex
@@ -356,7 +411,7 @@ class ProjectStore:
             }
         except Exception:
             if temp_root.exists():
-                shutil.rmtree(temp_root)
+                _discard(temp_root)
             raise
 
     def stage_copy(self, project_path: str, stage_name: str) -> dict[str, Any]:

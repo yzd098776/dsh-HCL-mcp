@@ -11,7 +11,7 @@ from uuid import uuid4
 from pydantic import Field
 
 from mcp_hcl.cli_session import PersistentConsole
-from mcp_hcl.console import ConsoleError, endpoint
+from mcp_hcl.console import ConsoleError, resolve_endpoint
 from mcp_hcl.deployment import Deployment
 from mcp_hcl.gui_relay import rejected
 from mcp_hcl.inspection import reply_body
@@ -314,7 +314,7 @@ class SecurityAudit:
                 "invalid_audit_arguments",
                 "Use a device string and an integer timeout from 1 to 600",
             )
-        endpoint(topology, 1)
+        resolve_endpoint(topology, 1)
         budget = Deadline(timeout_seconds)
         runtime = self.runtime or RuntimeBinding(runner=budget.run)
         operation = uuid4().hex
@@ -405,7 +405,9 @@ class SecurityAudit:
                 safe_history.append(safe_event)
                 try:
                     remaining = budget.remaining()
-                    pipe = endpoint(topology, binding["device_id"])
+                    # HCL republishes the device pipe as a telnet console; the pipe
+                    # itself is held read-exclusively by SimwareClient.
+                    pipe = resolve_endpoint(topology, binding["device_id"])
                     channel = (
                         self.session_factory(pipe)
                         if self.session_factory
