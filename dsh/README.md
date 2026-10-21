@@ -15,7 +15,7 @@ connector row to the active DSH profile; the actual work happens in the
 
 | Requirement | Notes |
 |---|---|
-| DeepSeek Harness | 0.1.0-rc.7 or newer; `dsh plugin` requires `--profile <name>` |
+| DeepSeek Harness | 0.1.0-rc.7 or newer, no upper bound; compose verified with the 0.1.0-rc.7 CLI and the 0.2.1-rc.2 desktop app, and `dsh plugin` requires `--profile <name>` |
 | Python | 3.11+ |
 | `mcp-hcl` on `PATH` | `pipx install mcp-hcl`, or `uv tool install mcp-hcl`, or point `command:` at an absolute `.exe` |
 | HCL / H3C Cloud Lab | Windows only, for the native (live-lab) tools; offline planning and staging work without it |

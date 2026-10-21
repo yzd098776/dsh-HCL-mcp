@@ -43,7 +43,7 @@ what to confirm before calling: 24 read-only, 14 destructive device-mutating,
 | Requirement | Notes |
 |---|---|
 | Python | 3.11+ |
-| MCP client | Any stdio client; DeepSeek Harness 0.1.0-rc.7+ for the bundled plugin |
+| MCP client | Any stdio client; DeepSeek Harness 0.1.0-rc.7+ (no upper bound: the bundle composes on the 0.1.0-rc.7 CLI and runs in the 0.2.1-rc.2 desktop app) |
 | Windows | Required for live-lab and GUI tools; offline planning/staging tools also run on Linux/macOS |
 | HCL (H3C Cloud Lab) | Required for native tools; without it the server starts and offline tools still work |
 
