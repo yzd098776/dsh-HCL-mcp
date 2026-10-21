@@ -1,42 +1,164 @@
 # MCP_HCL
 
-与 Agent 客户端无关的 HCL MCP Server，当前版本 **0.5.0**。本地主分支整合了已有分支历史和最新已验证的软件成果；完整 MCP-Packet-Tracer 62 工具/5 资源等价仍为 **Incomplete**。
+**A Model Context Protocol server for HCL (H3C Cloud Lab): plan and stage topologies offline, inspect a live lab through its real telnet bridge, and change device configuration only through gated, receipt-backed operations.**
 
-接手读 [HANDOFF.md](HANDOFF.md)，完整索引见 [docs/README.md](docs/README.md)。当前发现面为 **55 工具/6 资源**；发现、软件合同、原生配置与真实流量分别记账，`full_live_gate_passed=false`。
+[![CI](https://github.com/cheese-sansan/MCP_HCL/actions/workflows/software-ci.yml/badge.svg)](https://github.com/cheese-sansan/MCP_HCL/actions/workflows/software-ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
-## 能力与限制
+Ships a DeepSeek Harness bundle ([`dsh/`](dsh/README.md)) and works with any
+other MCP client over stdio.
 
-- 离线工程检查、阶段副本、编辑、严格规划与配置/操作清单生成，支持哈希绑定的导出和重载。
-- 原生配置服务包含 ACL/VLAN/NAT、接口调优、STP/端口安全与 NetStream；默认写入关闭，必须绑定实际设备、备份、范围回读和恢复入口。
-- 差异、健康、地址观察和安全审计保留未知值及模拟/原生来源；不把缺字段、阶段库存或保存文件解释为完整实时拓扑。
-- GUI 保护验证身份、当前账号目录、监听者及工程回执；不能证明厂商运行时环境或清理边界。
+---
 
-上游工具库存仍为 12 implemented / 47 planned / 3 unverified。原生完整设备/线缆库存、若干 IOS→Comware 行为映射、命名 exporter/monitor 与安全 Phone 关联等仍缺。
+## What it does
 
-2026-10-11 具名报告记录一次单设备隔离生命周期和账号清理；候选独占 CLI 被后台 MultiCC 保护拒绝，配置与网络验收未完成。证据位置与后续门槛见 [当前交接](HANDOFF.md) 和 [测试指南](docs/live-acceptance.md)。
+| Area | Tools |
+|---|---|
+| Topology planning and staging | `hcl_plan_topology`, `hcl_stage_plan`, `hcl_stage_copy`, `hcl_stage_add_device`, `hcl_stage_link`, `hcl_move/rename/delete`, `hcl_export_artifacts`, `hcl_load_plan`, `hcl_fix_plan` |
+| Offline validation and generation | `hcl_validate_plan`, `hcl_explain_plan`, `hcl_estimate_plan`, `hcl_generate_configs`, `hcl_generate_operations` |
+| Live lab read-only inspection | `hcl_read_vlans`, `hcl_read_qos`, `hcl_inspect_ports`, `hcl_health_check`, `hcl_diff`, `hcl_audit_security`, `hcl_inspect_project`, `hcl_capabilities`, … |
+| Gated device configuration | `hcl_apply_vlan`, `hcl_apply_acl`, `hcl_apply_nat`, `hcl_apply_stp`, `hcl_apply_port_security`, `hcl_apply_netstream`, `hcl_apply_interface_tuning`, `hcl_remove_acl`, `hcl_remove_nat`, `hcl_backup_config`, `hcl_restore_config`, `hcl_live_deploy`, `hcl_device_power`, `hcl_console_exec` |
 
-## 安装与运行
+Full surface: **55 tools / 6 resources**, discoverable via `tools/list` and
+`resources/list`. Every tool carries MCP safety annotations (`readOnlyHint`,
+`destructiveHint`, `idempotentHint`, `openWorldHint`) so a client can decide
+what to confirm before calling: 24 read-only, 14 destructive device-mutating,
+17 staging/GUI/other.
 
-需要 Python 3.11+；原生功能需要合法安装的 Windows HCL。使用当前工作区的独立环境：
+## What it changes in the Harness, and what it does not
+
+- **Changes**: one MCP client-connector row in the active DSH profile, which
+  exposes the server's tools as `mcp__hcl__<tool>`.
+- **Does not change**: no Harness core file is patched, no module is injected
+  into the Harness process, no lifecycle or install script runs, and no GUI is
+  automated by default.
+- **Does not do**: create HCL virtual machines, draw cables on the HCL canvas,
+  power devices on, or prove end-to-end connectivity. HCL itself owns VM
+  lifecycle; this server plans, validates, opens and configures.
+
+## Requirements
+
+| Requirement | Notes |
+|---|---|
+| Python | 3.11+ |
+| MCP client | Any stdio client; DeepSeek Harness 0.1.0-rc.7+ for the bundled plugin |
+| Windows | Required for live-lab and GUI tools; offline planning/staging tools also run on Linux/macOS |
+| HCL (H3C Cloud Lab) | Required for native tools; without it the server starts and offline tools still work |
+
+## Install
+
+```powershell
+pipx install mcp-hcl                 # or: uv tool install mcp-hcl
+```
+
+DeepSeek Harness plugin (adds the `hcl` MCP server row):
+
+```powershell
+dsh plugin --profile desktop add .\dsh   # from this checkout, or from a release tarball
+```
+
+Then set the HCL paths in the composed profile patch — see
+[`dsh/README.md`](dsh/README.md) for the full env table, health check and
+uninstall steps.
+
+Generic MCP client (`claude_desktop_config.json` style):
+
+```json
+{
+  "mcpServers": {
+    "hcl": {
+      "command": "mcp-hcl",
+      "env": {
+        "MCP_HCL_INSTALL_ROOT": "E:\\HCL",
+        "MCP_HCL_PROJECT_ROOTS": "C:\\Users\\me\\HCL\\Projects",
+        "MCP_HCL_OUTPUT_ROOT": "D:\\mcp-hcl\\staged",
+        "MCP_HCL_ALLOW_LIVE_WRITE": "0"
+      }
+    }
+  }
+}
+```
+
+## Quick start
+
+```text
+# offline: turn a declarative request into a real, staged HCL project
+hcl_estimate_plan  {template: "router_on_a_stick", routers: 1, pcs_per_lan: 3}
+hcl_stage_plan     {project_path: "C:\\Users\\me\\HCL\\Projects\\lab",
+                    stage_name: "demo", request: {...}, port_map: {...}}
+
+# live: read the running lab through the telnet bridge
+hcl_read_vlans     {project_path: "...\\work\\staged\\demo\\lab", topology: "topo1",
+                    device: "MSR36-20_1"}
+```
+
+## Safety and permissions
+
+- **Local only**: talks to `127.0.0.1:16600` (HCL backend) and
+  `127.0.0.1:30001-31024` (HCL telnet bridge). No outbound network access.
+- **Writes are opt-in**: `MCP_HCL_ALLOW_LIVE_WRITE` defaults to `0`; with the
+  default, device-mutating tools return a refusal instead of touching a device.
+- **Staged-only deployments**: destructive tools refuse the original HCL
+  project and require a stage receipt plus VDI/VM identity binding; every
+  operation writes a receipt under the configured output root.
+- **Evidence over claims**: read tools report `native_readback_verified`, and
+  the contract keeps `connectivity_verified` / `guest_boot_verified` /
+  `full_live_gate_passed` false because the server cannot prove those.
+- **No secrets**: stores no credentials; lab device logins stay inside the
+  emulated network.
+
+## Status and evidence
+
+- Verified on a real Windows HCL install: read-only tools return
+  `native_readback_verified: true` over the telnet bridge (14 ports, VLAN 1,
+  empty QoS DB, security audit, health and diff), after a restart and a fresh
+  staging round.
+- Boundary documented in [真实 HCL 观测](docs/hcl-live-findings.md): restart
+  invalidates a staged copy's config-disk UUID, so re-run the restage helper;
+  HCL's GUI cannot be automated from a non-elevated process.
+- Upstream MCP-Packet-Tracer parity is **incomplete** (12 implemented / 47
+  planned / 3 unverified). This project does not claim that parity.
+
+## Development
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e '.[dev]'
-$env:MCP_HCL_PROJECT_ROOTS = 'C:\Users\YOUR_NAME\HCL\Projects'
-$env:MCP_HCL_OUTPUT_ROOT = (Join-Path (Get-Location) 'work\staged')
-$env:MCP_HCL_INSTALL_ROOT = 'D:\HCL'
-$env:MCP_HCL_ALLOW_LIVE_WRITE = '0'
-.\.venv\Scripts\python.exe -m mcp_hcl.server
+.\.venv\Scripts\python.exe scripts\check_all.py     # ruff + full software verification
 ```
 
-stdio 服务等待协议输入；在 MCP 客户端配置相同解释器、工作区和环境。阶段工具仅写隔离输出副本。原生写入须按 [统一测试计划](docs/live-acceptance.md) 处理身份、资产和恢复前提。
+Module responsibilities and code style: [docs/development.md](docs/development.md).
+Contracts and schemas: [docs/contract-v2.md](docs/contract-v2.md),
+[docs/offline-contracts.json](docs/offline-contracts.json).
+A handful of tests exercise signed PowerShell helpers and need an execution
+policy that permits them.
 
-## 开发与验证
+## Documentation
 
-```powershell
-.\.venv\Scripts\python.exe scripts\check_all.py
-```
+| Document | Purpose |
+|---|---|
+| [docs/README.md](docs/README.md) | Documentation index |
+| [docs/offline-api.md](docs/offline-api.md) | Tool groups and call patterns |
+| [docs/contract-v2.md](docs/contract-v2.md) | Strict argument/result/recovery contract |
+| [docs/deepseek-harness.md](docs/deepseek-harness.md) | Schema projection and Harness registration |
+| [docs/hcl-live-findings.md](docs/hcl-live-findings.md) | Real HCL observations and known issues |
+| [docs/live-acceptance.md](docs/live-acceptance.md) | Software and native acceptance steps |
+| [HANDOFF.md](HANDOFF.md) | Current version, verification results, next steps |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
+| [SECURITY.md](SECURITY.md) | Reporting a vulnerability |
 
-该入口运行 Ruff 和全部软件检查，强制真实写开关为 0，并为每轮保存独立回执。历史成功与失败不覆盖。开发规范和模块职责见 [development.md](docs/development.md)。原始检查结果定位见 HANDOFF。
+## 中文摘要
 
-参数见 [离线 API](docs/offline-api.md)、[严格合同 v2](docs/contract-v2.md) 和 [Schema](docs/offline-contracts.json)。日期化报告、重复交接与旧脚本快照已移出维护文档，保留 Git 历史和仓库外备份。
+MCP_HCL 把 HCL（H3C Cloud Lab）的规划、staging、只读回读与受控配置封装成 MCP
+工具，既可接入任意 MCP 客户端，也自带 DeepSeek Harness 插件包（`dsh/`）。
+
+安装：`pipx install mcp-hcl`，再 `dsh plugin --profile desktop add .\dsh`，并在
+profile 的 patch 里填好 `MCP_HCL_INSTALL_ROOT` / `MCP_HCL_PROJECT_ROOTS` /
+`MCP_HCL_OUTPUT_ROOT`。写设备默认关闭（`MCP_HCL_ALLOW_LIVE_WRITE=0`），只读与
+离线工具可直接使用。边界：本服务不创建虚拟机、不代替 HCL 画布，也不声称已证明
+业务连通性；真实设备结论见 [docs/hcl-live-findings.md](docs/hcl-live-findings.md)。
+
+## License
+
+MIT — see [LICENSE](LICENSE).

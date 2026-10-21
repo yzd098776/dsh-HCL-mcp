@@ -1,0 +1,33 @@
+# Register the MCP_HCL stdio server as the `hcl` MCP server.
+#
+# Tools show up in the Harness as `mcp__hcl__<tool>` (for example
+# `mcp__hcl__hcl_plan_topology`).  The server is started with
+# `command: mcp-hcl`, so the `mcp-hcl` console script must be on PATH:
+#
+#   pipx install mcp-hcl          # or: uv tool install mcp-hcl
+#
+# No module is loaded into the Harness process: this bundle only adds a client
+# connector row, and the server itself is a separate Python process.
+#
+# The absolute HCL paths cannot be guessed by a bundle, so set them in the same
+# `env:` block after installing (see README):
+#   MCP_HCL_INSTALL_ROOT      HCL install directory, e.g. "E:\\HCL"
+#   MCP_HCL_PROJECT_ROOTS     HCL project directory, e.g. "C:\\Users\\me\\HCL\\Projects"
+#   MCP_HCL_OUTPUT_ROOT       writable staging output root
+#   MCP_HCL_BACKEND_PORT      HCL simware backend port, default 16600
+#
+# MCP_HCL_ALLOW_LIVE_WRITE defaults to "0": staging/planning/read-only tools
+# work, device-mutating tools are refused until you opt in.
+- insert:
+    - id: mcp-hcl
+      name: "@deepseek-ai/dsh-mcp-client"
+      config:
+        serverName: hcl
+        transport: stdio
+        command: mcp-hcl
+        args: []
+        failOnStartupError: false
+        toolCallTimeoutMs: 120000
+        env:
+          MCP_HCL_SCHEMA_MODE: dsh
+          MCP_HCL_ALLOW_LIVE_WRITE: "0"

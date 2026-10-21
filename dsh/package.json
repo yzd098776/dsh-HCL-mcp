@@ -1,0 +1,31 @@
+{
+  "name": "dsh-mcp-hcl",
+  "version": "0.5.0",
+  "description": "DeepSeek Harness bundle that registers the MCP_HCL stdio server: HCL (H3C Cloud Lab) topology planning, staged project artifacts, live readback and gated device control as mcp__hcl__* tools.",
+  "license": "MIT",
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "mcp",
+    "model-context-protocol",
+    "hcl",
+    "h3c",
+    "network-automation"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cheese-sansan/MCP_HCL.git"
+  },
+  "homepage": "https://github.com/cheese-sansan/MCP_HCL#readme",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "cordis.patch.yml",
+    "README.md"
+  ]
+}

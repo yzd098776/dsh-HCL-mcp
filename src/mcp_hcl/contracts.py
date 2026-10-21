@@ -13,6 +13,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 from pydantic import ConfigDict, ValidationError, create_model
 
+from mcp_hcl import dsh_compat, tool_annotations
 from mcp_hcl.console import ConsoleError
 
 
@@ -77,7 +78,22 @@ class StrictFastMCP(FastMCP):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._strict_models: dict[str, Any] = {}
+        self._raw_parameters: dict[str, Any] = {}
         self.artifact_retries: Any = None
+
+    def raw_parameters(self, name: str) -> dict[str, Any] | None:
+        """Full pydantic schema for ``name``, before DeepSeek Harness projection."""
+        tool = self._tool_manager.get_tool(name)
+        if tool is None:
+            return None
+        self._model(tool)
+        return self._raw_parameters.get(name)
+
+    def raw_parameters_all(self) -> dict[str, Any]:
+        """Full pydantic schema for every advertised tool, keyed by tool name."""
+        for tool in self._tool_manager.list_tools():
+            self._model(tool)
+        return dict(self._raw_parameters)
 
     def _model(self, tool: Any) -> Any:
         if tool.name not in self._strict_models:
@@ -135,12 +151,42 @@ class StrictFastMCP(FastMCP):
                 ).model_json_schema()
                 tool.parameters.setdefault("$defs", {}).update(schema.pop("$defs", {}))
                 tool.parameters["properties"]["parameters"] = schema
+            if dsh_compat.schema_mode() == "dsh":
+                # DeepSeek Harness only accepts a closed keyword subset and
+                # degrades anything else to `unknown`/`Any`.  Project the
+                # advertised schema; validation still uses this model.
+                self._raw_parameters[tool.name] = json.loads(
+                    json.dumps(tool.parameters, ensure_ascii=False)
+                )
+                tool.parameters = self._project(tool.parameters)
             self._strict_models[tool.name] = model
         return self._strict_models[tool.name]
+
+    @staticmethod
+    def _project(parameters: dict[str, Any]) -> dict[str, Any]:
+        """Rewrite advertised parameters into the DeepSeek Harness subset."""
+        defs = parameters.get("$defs")
+        local_defs = defs if isinstance(defs, dict) else {}
+        properties = parameters.get("properties")
+        if isinstance(properties, dict):
+            depth = dsh_compat.plan_depth()
+            for field in ("plan", "request"):
+                schema = properties.get(field)
+                if isinstance(schema, dict):
+                    properties[field] = dsh_compat.outline(schema, depth=depth, defs=local_defs)
+            payload = properties.get("parameters")
+            if isinstance(payload, dict):
+                properties["parameters"] = dsh_compat.project(payload, defs=local_defs)
+        return dsh_compat.project_tool_parameters(parameters)
 
     async def list_tools(self) -> Any:
         for tool in self._tool_manager.list_tools():
             self._model(tool)
+            if tool.annotations is None:
+                # Safety hints are part of the discovery surface, not the call
+                # path: a client decides whether to ask for confirmation from
+                # tools/list alone.
+                tool.annotations = tool_annotations.for_tool(tool.name)
         return await super().list_tools()
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:

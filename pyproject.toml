@@ -10,6 +10,37 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = ["mcp>=1.28,<2", "pydantic>=2.11,<3", "packaging>=24,<27"]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "hcl",
+    "h3c",
+    "network-automation",
+    "netops",
+    "comware",
+    "deepseek-harness",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Telecommunications Industry",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://github.com/cheese-sansan/MCP_HCL"
+Documentation = "https://github.com/cheese-sansan/MCP_HCL/blob/main/docs/README.md"
+Repository = "https://github.com/cheese-sansan/MCP_HCL"
+Changelog = "https://github.com/cheese-sansan/MCP_HCL/blob/main/CHANGELOG.md"
+Issues = "https://github.com/cheese-sansan/MCP_HCL/issues"
+Security = "https://github.com/cheese-sansan/MCP_HCL/security/policy"
 
 [project.scripts]
 mcp-hcl = "mcp_hcl.server:main"

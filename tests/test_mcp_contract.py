@@ -38,6 +38,8 @@ from mcp.client.stdio import stdio_client
 from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 
+from mcp_hcl import tool_annotations
+
 # Any tool whose name suggests live canvas, power, console or capture control.
 LIVE_TOOL_NAME = re.compile(
     r"deploy|start|stop|power|cli|console|ping|capture|canvas|packet", re.IGNORECASE
@@ -330,6 +332,28 @@ class McpContractTests(unittest.IsolatedAsyncioTestCase):
         return str(self.paths["project"])
 
     # ------------------------------------------------------------ discovery
+    async def test_every_advertised_tool_carries_safety_annotations(self) -> None:
+        """Clients decide whether to ask for confirmation from tools/list alone."""
+        async with mcp_session(self.paths) as session:
+            listed = await session.list_tools()
+            names = {tool.name for tool in listed.tools}
+            tool_annotations.validate_coverage(names)
+            for tool in listed.tools:
+                hints = tool.annotations
+                self.assertIsNotNone(hints, f"{tool.name} advertises no annotations")
+                expected = tool_annotations.for_tool(tool.name)
+                self.assertEqual(
+                    (hints.readOnlyHint, hints.destructiveHint, hints.openWorldHint),
+                    (expected.readOnlyHint, expected.destructiveHint, expected.openWorldHint),
+                    tool.name,
+                )
+                if tool.name in tool_annotations.READ_ONLY_TOOLS:
+                    self.assertTrue(hints.readOnlyHint, tool.name)
+                    self.assertFalse(hints.destructiveHint, tool.name)
+                if tool.name in tool_annotations.DEVICE_MUTATING_TOOLS:
+                    self.assertFalse(hints.readOnlyHint, tool.name)
+                    self.assertTrue(hints.destructiveHint, tool.name)
+
     async def test_discovery_surface_matches_pinned_inventory(self) -> None:
         async with mcp_session(self.paths) as session:
             listed = await session.list_tools()
