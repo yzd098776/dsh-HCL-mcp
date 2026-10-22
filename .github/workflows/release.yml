@@ -66,9 +66,12 @@ jobs:
 
   npm:
     needs: build
-    # Opt-in: set the repository variable NPM_PUBLISH=true and add an npm
-    # automation token as the NPM_TOKEN secret. The bundle lives in the repo
-    # root package.json, so `npm publish` ships only package.json plus dsh/.
+    # Opt-in: set the repository variable NPM_PUBLISH=true and register this
+    # repository as a trusted publisher for `dsh-mcp-hcl` on npmjs.com
+    # (package Settings -> Trusted publishers -> GitHub Actions, workflow
+    # `release.yml`). Publishing then uses OIDC, so no NPM_TOKEN secret is
+    # needed. `npm stage publish` only stages the version; a maintainer
+    # approves it in the npm web UI with a 2FA challenge before it goes live.
     if: ${{ vars.NPM_PUBLISH == 'true' }}
     runs-on: ubuntu-latest
     permissions:
@@ -76,13 +79,14 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Publish bundle to npm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Stage the bundle for npm (trusted publishing)
         run: |
+          npm install -g npm@latest
           npm --version
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
-          npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          npm stage publish
 
   pypi:
     needs: build

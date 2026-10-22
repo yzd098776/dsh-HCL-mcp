@@ -166,9 +166,13 @@ DSH 用 `@deepseek-ai/dsh-mcp-client` 连接 MCP 服务，工具在模型侧显�
 没有 Host 模块、没有生命周期脚本、不改 Harness 内核），它插入的就是上面这一行：
 
 ```powershell
-pipx install mcp-hcl                  # 提供 mcp-hcl 控制台脚本
-dsh plugin --profile desktop add .\dsh
+pipx install mcp-hcl                        # 提供 mcp-hcl 控制台脚本（PyPI）
+dsh plugin --profile desktop add dsh-mcp-hcl  # 从 npm registry 装插件包
 ```
+
+插件包已发布到 npm（`dsh-mcp-hcl@0.5.0`），也可以从仓库根目录
+`dsh plugin --profile desktop add .`、或 `add .\dsh` 装子目录那份；三条路径装出来的
+都是同一行配置。
 
 包里的 `command` 写的是 `mcp-hcl`（依赖 PATH），`env` 只给了
 `MCP_HCL_SCHEMA_MODE=dsh` 和默认关闭的 `MCP_HCL_ALLOW_LIVE_WRITE=0`；HCL 路径这类

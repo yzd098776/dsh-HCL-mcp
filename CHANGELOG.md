@@ -31,6 +31,12 @@ and the bundle in `dsh/` is installed from the repository checkout.
   `hcl://schema/tools` resource.
 - Release automation (`.github/workflows/release.yml`): tag → wheel/sdist,
   SHA-256 checksums, GitHub Release, PyPI trusted publishing.
+- **npm bundle** `dsh-mcp-hcl@0.5.0`, published through npm staged
+  publishing and installable with
+  `dsh plugin --profile desktop add dsh-mcp-hcl`. The packed tarball is
+  7.2 KB and contains only `package.json`, `LICENSE`, `README.md` and `dsh/`.
+  The release workflow stages future versions over OIDC trusted publishing
+  (`NPM_PUBLISH=true`); a maintainer approves each staged version on npmjs.com.
 
 ### Fixed
 
@@ -55,12 +61,6 @@ Real-machine bugs found only by running against HCL, not by the offline suite:
   explicitly.
 - `machine_values` mixed JSON and raw escaping, producing unparsable values for
   some displays.
-
-- npm bundle publishing: root `package.json` is publishable as `dsh-mcp-hcl`
-  (the packed tarball contains only `package.json`, `LICENSE`, `README.md`
-  and `dsh/`), so the plugin installs with
-  `dsh plugin --profile desktop add dsh-mcp-hcl`; the release workflow has
-  an opt-in `npm` job (`NPM_PUBLISH=true` + `NPM_TOKEN`).
 
 ### Documentation
 

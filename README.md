@@ -4,6 +4,7 @@
 
 [![CI](https://github.com/yzd098776/dsh-HCL-mcp/actions/workflows/software-ci.yml/badge.svg)](https://github.com/yzd098776/dsh-HCL-mcp/actions/workflows/software-ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/mcp-hcl.svg)](https://pypi.org/project/mcp-hcl/)
+[![npm](https://img.shields.io/npm/v/dsh-mcp-hcl.svg)](https://www.npmjs.com/package/dsh-mcp-hcl)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
